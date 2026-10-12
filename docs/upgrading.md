@@ -383,6 +383,14 @@ room. Ratification has an address, and the next version opens as a real draft.
 | The constitution template no longer requires `- **Merge strategy:** merge-commits-when-stacked`; the prompt is now a free-text line for the project's own strategy, and nothing in em reads it. The engagement skill no longer refuses without the line | no action needed; a constitution that still carries the old line is fine — the skill ignores it. Edit it to your real strategy when you next amend the constitution (the owner ratifies) |
 | **Release note: nothing to run** — update the `@milehimikey/em` dependency (and the plugin pin to `em-1-15-0` / `v1.15.0` on plugin repos); `em upgrade` has no 1.15.0 step. | no action needed |
 
+## 1.16.1
+
+Dependency patch: `braces` leaves the runtime dependency tree.
+
+| What changed for a model repo | Handled by `em upgrade`? |
+|---|---|
+| `em watch` moves from chokidar 3 to chokidar 4 (#252, Dependabot alert 28, CVE-2026-93687 in `braces`): `braces` is no longer in `@milehimikey/em`'s install tree, so a consuming repo's audit comes up clean. The watcher now watches the `slices/` directory beside the model (filtered to `.md`) instead of a glob — same behaviour, including picking up a slice doc created mid-session, and a `slices/` directory created after the watcher started | no action needed; update the `@milehimikey/em` dependency (and the plugin pin to `em-1-16-1` / `v1.16.1` on plugin repos) |
+
 ## 1.16.0
 
 The exchange, first hardening: fixes from a real engagement run through draft, review, ready,
