@@ -57,7 +57,7 @@ describe("applyDefer (pure)", () => {
     const first = applyDefer(DOC, BASE);
     if (!first.ok) throw new Error("setup");
     const again = applyDefer(first.content, BASE);
-    expect(again).toEqual({ ok: true, content: first.content, changed: false });
+    expect(again).toMatchObject({ ok: true, content: first.content, changed: false });
   });
   it("refuses: not found", () => {
     expect(applyDefer(DOC, { ...BASE, question: "nothing" })).toEqual({
@@ -181,8 +181,8 @@ describe("em slice defer (CLI acceptance, MIL-275)", () => {
     );
     expect(openQuestionsErr()).toBe(false);
     const state = readFileSync(join(dir, ".event-modeling.md"), "utf8");
-    expect(state).toContain("- retry policy (from slice pay, deferred to v2)");
-    expect(state).toContain('- 2026-10-08: deferred "retry policy" on pay to v2 — v1: fail fast — by Alex');
+    expect(state).toContain("- What is the retry policy? (from slice pay, deferred to v2)");
+    expect(state).toContain('- 2026-10-08: deferred "What is the retry policy?" on pay to v2 — v1: fail fast — by Alex');
   });
   it("a second identical run is a no-op", () => {
     const before = [readFileSync(slicePath(), "utf8"), readFileSync(join(dir, ".event-modeling.md"), "utf8")];
@@ -293,7 +293,7 @@ describe("applyDeferOrAppend (pure, MIL-281)", () => {
   it("is idempotent once the item is there", () => {
     const first = applyDeferOrAppend(DOC, "What about chargebacks?", INPUT);
     if (!first.ok) throw new Error("setup");
-    expect(applyDeferOrAppend(first.content, "What about chargebacks?", INPUT)).toEqual({ ok: true, content: first.content, changed: false });
+    expect(applyDeferOrAppend(first.content, "What about chargebacks?", INPUT)).toMatchObject({ ok: true, content: first.content, changed: false });
   });
   it("still validates --until and --decision", () => {
     expect(applyDeferOrAppend(DOC, "x", { ...INPUT, until: "v1" })).toEqual({
@@ -418,5 +418,34 @@ describe("skills carry the deferral sentence (MIL-275 grep gate)", () => {
     for (const s of ["**Answered in the room**", "**Raised in the room, not for this version**", "**Already on the doc, not for this version**", "nothing left `- [ ]` and no open `issue`"]) {
       expect(review, s).toContain(s);
     }
+  });
+});
+
+describe("applyDefer matched text (GH #283)", () => {
+  const doc = (...items: string[]) => `---\nversion: 1\n---\n# Slice\n\n## Open Questions\n\n${items.join("\n")}\n\n## Notes\n`;
+  const matched = (d: string, q: string) => {
+    const r = applyDefer(d, { ...BASE, question: q });
+    return r.ok ? r.matched : `ERR ${r.message}`;
+  };
+  it("returns the whole item, not the match substring", () => {
+    expect(matched(doc("- [ ] What is the retry policy?"), "retry policy")).toBe("What is the retry policy?");
+  });
+  it("returns the bold title when the item opens with one", () => {
+    expect(matched(doc("- [ ] **Retry policy** — how many attempts before we give up?"), "attempts")).toBe("Retry policy");
+  });
+  it("ignores a checked item that also matches the fragment", () => {
+    expect(matched(doc("- [x] Who owns retry config? — resolved: ops", "- [ ] What is the retry policy for charges?"), "retry")).toBe(
+      "What is the retry policy for charges?",
+    );
+  });
+  it("the idempotent no-op returns the label without the deferral suffix", () => {
+    const first = applyDefer(doc("- [ ] What is the retry policy?"), BASE);
+    expect(first.ok && first.changed).toBe(true);
+    const again = first.ok ? applyDefer(first.content, BASE) : first;
+    expect(again).toMatchObject({ ok: true, changed: false, matched: "What is the retry policy?" });
+  });
+  it("has no matched text when applyDeferOrAppend appends (nothing to match)", () => {
+    const r = applyDeferOrAppend(doc("- [ ] x"), "brand new", { ...BASE });
+    expect(r.ok && r.matched).toBeFalsy();
   });
 });
