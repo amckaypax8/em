@@ -4002,6 +4002,61 @@ em model version show model.em --json
 itself, since a later bump can outrun certification (the example above: v2 was bumped, but only
 v1 was ever certified). `null` for either field means "never bumped"/"never certified".
 
+## `em discover triage-check <file>`
+
+Deterministic checker for `discovery/prd-triage.json` (GH #295), the record the discover skill's
+[PRD/spec path](../.claude/skills/event-modeling-discover/reference/prd-spec-path.md) writes
+when it is handed a PRD or API spec. The LLM judges (classification, grouping, rewriting); this
+checks what must not be judged. Checks:
+
+- `prdTriageSchemaVersion` is `"1.0"` and `rubricVersion` is the shipped rubric's version (`"1.0"`,
+  `reference/prd-rubric.md` in the skill bundle).
+- `source` names the input document (relative to the triage file, or `--source`), and **every
+  `statements[].quote` and `storylines[].quote` appears verbatim in it** (Markdown emphasis and
+  code marks `` ` `` `*` `_` are stripped and smart quotes straightened on both sides, whitespace
+  runs are normalised; a quote under 12 characters is rejected; the agent may reword in
+  `rewrite`, never in `quote`). A storyline's `quote` is the full walkthrough span.
+- Exactly one storyline is `main`; ids are unique; every group names a declared storyline and is
+  joined by at least one statement.
+- Every statement has a rubric `category`, an `aboutBusiness` check result, a `confidence`, a
+  `provenance` (`walkthrough` or `reference`) and an `outcome`
+  (`modeled`/`rewritten`/`constraint`/`parked`/`question`) the category allows (`question` and
+  `parked` are allowed for every category).
+  `modeled`/`rewritten` need a declared `group` and a `storyline` equal to the group's; the others
+  have `group: null`. `rewritten` needs `rewrite`, `parked` a `reason`, `question` a `question`;
+  a `resource-or-endpoint` is never `modeled`; `low` confidence is always a `question`; every
+  `constraint` appears in `constraints[]`.
+- **Disagreement is a question.** The rubric records the `aboutBusiness` answer each category
+  expects (`true`, `false` or `either`); a statement whose `aboutBusiness` contradicts it must have
+  outcome `question` (the question text carries the proposed rewrite).
+- **Walkthrough-first, checked not declared.** A `walkthrough` statement's quote must lie inside
+  some storyline's quote; a `reference` statement's quote must lie outside all of them. A group is
+  either *anchored* (names a storyline and has at least one `walkthrough` statement inside that
+  storyline's span) or *reference-only* (every statement `reference`; `storyline: null` on the
+  group and its statements, and a reference-only group that names a storyline is rejected).
+  Reference-only groups pass but are listed in the report, outside every storyline (operations no
+  walkthrough touches; check these are not CRUD fill). A `question` may name the group it would
+  join once answered. No two statements may share, contain or be contained in each other's (normalised) quote. Only `modeled`/`rewritten` walkthrough statements anchor a group; a group anchored by questions only is an error.
+
+It cannot judge whether a classification is right, whether every walkthrough claim has a
+statement, or whether the Decisions-log entry for each parked or rejected statement was written:
+that entry is prose in the state file and is unchecked.
+
+| Flag | Effect |
+|---|---|
+| `--source <path>` | Check quotes against this document instead of the file's own `source` |
+| `--markdown` | After a passing check, print the Markdown view of the record instead of the summary |
+| `--json` | Print `{ ok, path, source, storylines, groups, statements, referenceOnlyGroups, errors }` (`source` resolved to an absolute path; on failure `{ ok, path, errors }`) |
+
+```bash
+cd examples/prd-triage && em discover triage-check prd-triage.json
+# -> ok — prd-triage.json: 2 storyline(s), 6 group(s), 15 statement(s), quotes verbatim in ../../eval/inputs/meridian-goods/input.md
+```
+
+The text report prints the source relative to the working directory. Exit 1 (each error printed,
+one per line) on any problem. Also exposed as the MCP `discover_triage_check` tool (see
+[mcp.md](mcp.md)).
+
 ## `em conform-findings check <path>`
 
 Read-only shape validator for a `conformance/<date>-findings.json` file (MIL-214) — the

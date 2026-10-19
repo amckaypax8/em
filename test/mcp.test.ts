@@ -314,6 +314,7 @@ describe("tools/list", () => {
         "contract",
         "coverage",
         "diff",
+        "discover_triage_check",
         "engagement_foundation",
       "engagement_plan",
         "engagement_status",
@@ -1043,6 +1044,31 @@ describe("changelog tool", () => {
     })) as unknown as CallToolResult;
     expect(result.isError).toBe(true);
     expect((result.content[0] as { text: string }).text).toContain("is not inside a git repository");
+  });
+});
+
+describe("discover_triage_check tool (GH #295)", () => {
+  const FIX = join(ROOT, "test", "fixtures", "prd-triage");
+
+  it("returns ok for the library fixture, resolving `source` relative to the triage file", async () => {
+    const { doc } = await callJson(client, "discover_triage_check", { path: join(FIX, "library-triage.json") });
+    expect(doc).toMatchObject({ ok: true, statements: 9, storylines: 2, groups: 5, referenceOnlyGroups: ["Correct Book Details"], errors: [] });
+    expect(doc.source).toBe(join(FIX, "library-api-spec.md"));
+  });
+
+  it("returns findings for a doctored copy", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "em-mcp-triage-"));
+    try {
+      cpSync(FIX, tmp, { recursive: true });
+      const d = JSON.parse(readFileSync(join(tmp, "library-triage.json"), "utf8"));
+      d.statements[0].quote = "A member teleports a book.";
+      writeFileSync(join(tmp, "library-triage.json"), JSON.stringify(d));
+      const { doc } = await callJson(client, "discover_triage_check", { path: join(tmp, "library-triage.json") });
+      expect(doc.ok).toBe(false);
+      expect(doc.errors.join("\n")).toContain("S1: quote does not appear verbatim");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 
