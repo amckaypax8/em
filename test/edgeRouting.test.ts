@@ -18,6 +18,9 @@ import { semanticEdges } from "../src/model/edges.js";
 const EXAMPLE = "examples/timeline-rules.em";
 const exampleSrc = () => readFileSync(EXAMPLE, "utf8");
 
+// OBSTRUCTED's event -> view path as drawn by main before side entry existed.
+const BASE_PATH = "M151,0 C151,14 1334,14 1334,-161.28";
+
 // A deliberately awkward layout, which the shipped example is not: the read model sits six
 // slices from the event that feeds it, in a different context lane, so the direct curve
 // between them runs straight through the Ticket lane. Real models should keep arrows span-1
@@ -209,5 +212,102 @@ describe("edge routing never crosses an unrelated box", () => {
     const ids = new Set(instances.map((i) => i.id));
     const between = semanticEdges(model).filter((e) => ids.has(e.from) && ids.has(e.to));
     expect(between).toEqual([]);
+  });
+
+  // GH #254 — a `ui` sharing a processor's slice blocks the processor's bottom face (the
+  // ui sits directly below it in the same column), so the inbound edge used to loop far
+  // above the canvas or fall back to a straight line through the ui box.
+  const PROC_WITH_UI = `model "Processor with ui in same slice"
+persona Operator
+context Item
+slice "Create Item" {
+  ui Create Item @Operator
+  command CreateItem
+  event ItemCreated @Item
+}
+slice "Pending Items" {
+  view PendingItems from "ItemCreated"
+  ui Read Pending Items @Operator
+}
+slice "Complete Item" {
+  ui Complete Item @Operator
+  processor ItemScheduler from "PendingItems"
+  command CompleteItem
+  event ItemCompleted @Item
+}
+arrow "Complete Item" -> CompleteItem
+`;
+
+  /** 25 slices over 7 contexts; every fifth slice is a processor slice that also holds a ui. */
+  function largeProcWithUi(): string {
+    const ctx = ["A", "B", "C", "D", "E", "F", "G"];
+    let s = `model "Large"\npersona Agent\n${ctx.map((c) => `context ${c}`).join("\n")}\n`;
+    for (let i = 0; i < 25; i++) {
+      const c = ctx[i % ctx.length];
+      if (i % 5 === 4) {
+        s +=
+          `slice "S${i}" {\n  processor P${i} from "V${i - 1}"\n  ui U${i} @Agent\n` +
+          `  command C${i}\n  event E${i} @${c}\n}\n`;
+      } else if (i % 5 === 3) {
+        s += `slice "S${i}" {\n  view V${i} from "E${i - 1}"\n  ui R${i} @Agent\n}\n`;
+      } else {
+        s += `slice "S${i}" {\n  ui U${i} @Agent\n  command C${i}\n  event E${i} @${c}\n}\n`;
+      }
+    }
+    return s;
+  }
+
+  /** For each edge into a processor: where it ends, and how far its path strays. */
+  function processorEdges(svg: string, src: string) {
+    const model = normalize(parse(src));
+    const rects = parseNodeRects(svg, new Set(model.byId.keys()));
+    const group = /<g class="em-edges">([\s\S]*?)<\/g>/.exec(svg)![1];
+    const ds = [...group.matchAll(/ d="([^"]+)"/g)].map((m) => m[1]);
+    const edges = semanticEdges(model);
+    const out: { endOnSide: boolean; withinRows: boolean }[] = [];
+    edges.forEach((e, i) => {
+      if (model.byId.get(e.to)?.kind !== "processor") return;
+      const f = rects.get(e.from)!;
+      const t = rects.get(e.to)!;
+      const nums = [...ds[i].matchAll(/(-?[\d.]+),(-?[\d.]+)/g)].map((m) => [+m[1], +m[2]]);
+      const [ex, ey] = nums[nums.length - 1];
+      const ys = nums.map((q) => q[1]);
+      out.push({
+        endOnSide: (Math.abs(ex - t.left) < 1 || Math.abs(ex - t.right) < 1) && ey > t.top && ey < t.bottom,
+        // never strays beyond the rows the two boxes span, plus one gutter
+        withinRows:
+          Math.min(...ys) >= Math.min(f.top, t.top) - 14 && Math.max(...ys) <= Math.max(f.bottom, t.bottom) + 14,
+      });
+    });
+    return out;
+  }
+
+  it("routes the inbound edge of a processor that shares its slice with a ui clear of that ui", async () => {
+    const svg = await renderSource(PROC_WITH_UI);
+    expect(crossingsIn(svg, PROC_WITH_UI)).toEqual([]);
+    const edges = processorEdges(svg, PROC_WITH_UI);
+    expect(edges.length).toBe(1);
+    expect(edges.every((e) => e.endOnSide && e.withinRows)).toBe(true);
+  });
+
+  it("keeps the same inbound edge short and in-canvas in a 25-slice, 7-context model", async () => {
+    const src = largeProcWithUi();
+    const svg = await renderSource(src);
+    expect(crossingsIn(svg, src)).toEqual([]);
+    const edges = processorEdges(svg, src);
+    expect(edges.length).toBeGreaterThan(3);
+    expect(edges.every((e) => e.endOnSide && e.withinRows)).toBe(true);
+  });
+
+  it("leaves an event -> view edge on the established route (no side entry into a view)", async () => {
+    const svg = await renderSource(OBSTRUCTED);
+    const model = normalize(parse(OBSTRUCTED));
+    const from = model.byName.get("refund requested")![0];
+    const to = model.byName.get("refund backlog")![0];
+    const group = /<g class="em-edges">([\s\S]*?)<\/g>/.exec(svg)![1];
+    const ds = [...group.matchAll(/ d="([^"]+)"/g)].map((m) => m[1]);
+    const i = semanticEdges(model).findIndex((e) => e.from === from.id && e.to === to.id);
+    // BASE_PATH was captured from main before side entry existed.
+    expect(ds[i]).toBe(BASE_PATH);
   });
 });

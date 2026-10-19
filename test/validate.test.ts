@@ -935,6 +935,23 @@ slice "Weird" {
     );
   });
 
+  it("adds the routing clause only when the reaction has an inbound `from` edge", () => {
+    const diags = disconnected(`
+context Shipping
+slice "Todo" {
+  view Parcels To Send from "Parcel Packed"
+}
+slice "Weird" {
+  ui Something @Ops
+  processor Carrier Adapter from "Parcels To Send"
+  command Confirm Delivery
+  event Delivery Confirmed @Shipping
+}
+`);
+    expect(diags).toHaveLength(1);
+    expect(diags[0].message).toContain("inbound edge has to be routed around it");
+  });
+
   it("warns for any automation alias (processor), not just translation", () => {
     expect(
       disconnected(`

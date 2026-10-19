@@ -13,6 +13,7 @@
 
 import { NormalizedModel } from "../model/model.js";
 import { semanticEdges } from "../model/edges.js";
+import { AUTOMATION_KINDS } from "../parser/ast.js";
 import { edgeColorFor } from "../emit/theme.js";
 import { Box, Rect } from "./svgGeometry.js";
 
@@ -69,9 +70,14 @@ export function buildEdgeOverlay(model: NormalizedModel, rects: Map<string, Rect
       const blockers: Rect[] = [];
       for (const [id, r] of rects) if (id !== e.from && id !== e.to) blockers.push(r);
       const direct = curvePoints(f, t);
-      let pts = direct;
+      let pts: Cubic | string = direct;
       if (hits(direct, blockers).length) {
-        const routed = detour(f, t, blockers);
+        // Side entry is for exactly one shape (GH #254): a reaction whose bottom face has a
+        // box stacked right under it (a `ui` sharing its slice). Everything else keeps the
+        // established corridor / over / under routing.
+        const kind = model.byId.get(e.to)?.kind;
+        const sideOk = kind !== undefined && AUTOMATION_KINDS.has(kind) && bottomBlocked(t, blockers);
+        const routed = detour(f, t, blockers, sideOk);
         if (routed) {
           pts = routed;
         } else {
@@ -86,7 +92,7 @@ export function buildEdgeOverlay(model: NormalizedModel, rects: Map<string, Rect
           );
         }
       }
-      d = cubic(...pts);
+      d = typeof pts === "string" ? pts : cubic(...pts);
     }
     colors.add(color);
     grow(box, d);
@@ -198,9 +204,10 @@ function flatRoute(f: Rect, t: Rect, y: number): Cubic {
 
 /** First clear route: through the corridor between the two rows if one fits, else arcing
  *  over everything, else under. Null when nothing clears within the try budget. */
-function detour(f: Rect, t: Rect, boxes: Rect[]): Cubic | null {
+function detour(f: Rect, t: Rect, boxes: Rect[], sideOk: boolean): Cubic | string | null {
   return (
     corridorRoute(f, t, boxes) ??
+    (sideOk ? sideEntryRoute(f, t, boxes) : null) ??
     routeAround(f, t, boxes, -1) ??
     routeAround(f, t, boxes, 1)
   );
@@ -221,6 +228,90 @@ function corridorRoute(f: Rect, t: Rect, boxes: Rect[]): Cubic | null {
     }
   }
   return null;
+}
+
+const SIDE_STUB = 10; // how far a side-entry route runs out of / into a box before turning
+const SIDE_RADIUS = 6; // corner rounding for the polyline routes
+
+/** True when a box sits within a few gutters directly beneath `t` — in the same column. */
+function bottomBlocked(t: Rect, boxes: Rect[]): boolean {
+  return boxes.some(
+    (b) => b.left < t.cx && b.right > t.cx && b.top >= t.bottom && b.top - t.bottom <= 4 * GUTTER,
+  );
+}
+
+/** Leave `f` and enter `t` through their facing SIDES, travelling in the narrow gutters beside
+ *  the columns and crossing between them along the gap between two box rows. The vertical faces
+ *  are no use when another box sits right against them — a `ui` stacked above a view, or
+ *  between a processor and the row below it (GH #254) — and arcing over everything instead
+ *  throws the edge thousands of px off the canvas. The gutters between columns are always empty,
+ *  so this is the short path that never crosses a box it doesn't connect. */
+function sideEntryRoute(f: Rect, t: Rect, boxes: Rect[]): string | null {
+  const dir = t.cx >= f.cx ? 1 : -1;
+  let sx = dir > 0 ? f.right + SIDE_STUB : f.left - SIDE_STUB;
+  let tx = dir > 0 ? t.left - SIDE_STUB : t.right + SIDE_STUB;
+  if ((tx - sx) * dir < 0) return null; // columns too close to leave a gutter each
+  // Adjacent columns share one gutter: a single vertical in its middle, not an S-wiggle.
+  if (Math.abs(tx - sx) < GUTTER) sx = tx = (sx + tx) / 2;
+  // Leave the source off its centre line, toward the target, so the stub doesn't read as an
+  // arrow to whatever sits beside it in the next column.
+  const fy = f.cy + (t.cy < f.cy ? -1 : 1) * Math.min(10, (f.bottom - f.top) / 4);
+  const a = dir > 0 ? f.right : f.left;
+  const b = dir > 0 ? t.left : t.right;
+
+  // Candidate flat heights: the middle of every gap between box rows, shortest trip first.
+  const edges = [...new Set([f, t, ...boxes].flatMap((r) => [r.top, r.bottom]))].sort((p, q) => p - q);
+  const ys = [f.cy, t.cy];
+  for (let i = 0; i + 1 < edges.length; i++) {
+    if (edges[i + 1] - edges[i] >= 2 * GUTTER) ys.push((edges[i] + edges[i + 1]) / 2);
+  }
+  const mid = (f.cy + t.cy) / 2;
+  ys.sort((p, q) => Math.abs(p - f.cy) + Math.abs(p - t.cy) - (Math.abs(q - f.cy) + Math.abs(q - t.cy)) || Math.abs(p - mid) - Math.abs(q - mid));
+
+  for (const y of ys) {
+    const verts: [number, number][] = [[a, fy], [sx, fy], [sx, y], [tx, y], [tx, t.cy], [b, t.cy]];
+    if (!polyHits(verts, boxes)) return roundedPath(verts);
+  }
+  return null;
+}
+
+/** True when any segment of the polyline passes through a box's interior. */
+function polyHits(v: [number, number][], boxes: Rect[]): boolean {
+  for (let i = 0; i + 1 < v.length; i++) {
+    const [x0, y0] = v[i];
+    const [x1, y1] = v[i + 1];
+    for (let k = 1; k < SAMPLES; k++) {
+      const s = k / SAMPLES;
+      const x = x0 + (x1 - x0) * s;
+      const y = y0 + (y1 - y0) * s;
+      for (const r of boxes) if (x > r.left && x < r.right && y > r.top && y < r.bottom) return true;
+    }
+  }
+  return false;
+}
+
+/** A polyline with each interior corner rounded by a cubic whose control points sit on the corner. */
+function roundedPath(v: [number, number][]): string {
+  const pts = v.filter((p, i) => i === 0 || p[0] !== v[i - 1][0] || p[1] !== v[i - 1][1]);
+  let d = `M${n(pts[0][0])},${n(pts[0][1])}`;
+  for (let i = 1; i < pts.length; i++) {
+    const [px, py] = pts[i - 1];
+    const [x, y] = pts[i];
+    if (i === pts.length - 1) {
+      d += ` L${n(x)},${n(y)}`;
+      break;
+    }
+    const [nx, ny] = pts[i + 1];
+    const r = Math.min(SIDE_RADIUS, Math.hypot(x - px, y - py) / 2, Math.hypot(nx - x, ny - y) / 2);
+    const l1 = Math.hypot(x - px, y - py) || 1;
+    const l2 = Math.hypot(nx - x, ny - y) || 1;
+    const ax = x - ((x - px) / l1) * r;
+    const ay = y - ((y - py) / l1) * r;
+    const bx = x + ((nx - x) / l2) * r;
+    const by = y + ((ny - y) / l2) * r;
+    d += ` L${n(ax)},${n(ay)} C${n(x)},${n(y)} ${n(x)},${n(y)} ${n(bx)},${n(by)}`;
+  }
+  return d;
 }
 
 /** Arc over (dir -1) or under (dir 1) everything, widening past whatever it still hits. Each
