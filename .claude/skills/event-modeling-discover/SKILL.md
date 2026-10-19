@@ -21,28 +21,40 @@ layout, the Socratic/validation discipline every phase follows) and
 work — they are the source of truth. Run the preconditions there first.
 
 **Existing system?** Use the `extract` phase below. **New feature inside an existing codebase,
-not a whole-system extraction?** Stay in `discover`, but before locking in command/event names,
-Grep/Read adjacent real sources (OpenAPI specs, DB migrations, existing DTOs/event classes in
-sibling contexts) rather than guessing conventions — same check the `slice` phase applies to
-field tables (`event-modeling-design`).
+not a whole-system extraction?** Stay in `discover`, but **only after the storyboard exists**
+(step 2) and before locking in command/event names, Grep/Read adjacent real sources (OpenAPI
+specs, DB migrations, existing DTOs/event classes in sibling contexts) rather than guessing
+conventions — same check the `slice` phase applies to field tables (`event-modeling-design`).
+Those sources fill operations no walkthrough touches; they never supply the story.
 
 ## Phase: `discover` — steps 1-4
 
 Goal: a draft model of events, storyboard, commands, and views. Loose is OK; structure comes next.
 
-1. **Brainstorm events (step 1).** Ask the user to name everything that happens, as past-tense
+1. **Brainstorm events (step 1).** Draw the candidate events **from the walkthroughs and
+   journeys** (ask for them first; no walkthrough → *"what does success look like, start to
+   finish?"*): *"what happened, in the story's words?"* — business terms, never table or endpoint
+   vocabulary. Ask the user to name everything that happens, as past-tense
    facts. Probe for missed state changes. For each candidate, apply the **"is it an event?"
    test** (`methodology.md` step 1 — the "would this wake the CEO at 3am" heuristic):
    reject derived values (belong in a read model) and telemetry/activity (not business state).
    Don't silently drop rejections — park them in the state file's Decisions log with why, so
    they aren't re-proposed later. Capture the survivors as a flat list.
-2. **Plot / storyboard (step 2).** Order the events into the narrative. Identify **personas**
+2. **Plot / storyboard (step 2).** Start from the story, not the schema: ask for the spec's
+   **walkthroughs**, use cases and user journeys — or *"what does success look like, start to
+   finish?"* — and build the timeline from those (`methodology.md`, "The story, not the schema").
+   Name the **main storyline** (the end-to-end happy path) and each **secondary storyline**
+   (retire, extend, reorganize) before ordering anything; never one lifecycle block per entity
+   (the CRUD shape). The OpenAPI/migrations/resource reference comes **after** the storyboard,
+   only to fill operations no walkthrough touches. Order the events into the narrative. Identify **personas**
    (actors) and the **UI** screens at each step. Add `persona` declarations and `ui` elements.
    In a **headless/API** model there are no human personas or screens — identify the external
    **callers** at each step instead; declare one persona per caller/role, and its `ui` boxes are
    the API calls (see `methodology.md`).
 3. **Inputs (step 3).** For each event, find the **command** that causes it (imperative name).
-   Form `command → event` slices (State Change pattern). Every command needs a **trigger** in the
+   Form `command → event` slices (State Change pattern). Apply the **intent test**: name the
+   command for the intent a business person would say at this step of the story, not the
+   endpoint that carries it (`methodology.md`, "The story, not the schema"). Every command needs a **trigger** in the
    same breath: the screen the user issues it from (a `ui` in the slice), or — for the Automation
    and Translation patterns — the reaction that triggers it, also in this slice. A command
    nothing points at is a write nobody can start. *"Who does this, and where are they when they

@@ -81,7 +81,21 @@ Goal: a structurally complete, **validated** model with correct patterns and swi
    directly**. Add `translation` slices for external inputs (externally triggered: external →
    translation → command → event, no slice before) and for the system reacting to its own state
    (internally triggered: read model in the slice before → translation → command → event).
-2. **Elaborate scenarios — first pass (step 6).** Scaffold every slice's doc now, one per
+2. **Storyline review — before any slice doc is scaffolded.** Read the timeline as a story, not a schema
+   (`${CLAUDE_PLUGIN_ROOT}/shared/reference/methodology.md`, "The story, not the schema"; em repo
+   `docs/storyline.md`). Name the **main storyline** (end-to-end happy path) and every
+   **secondary storyline** (retire, extend, reorganize), and group the slices under them; one
+   lifecycle block per entity (N × create/update/archive, one trailing view each) is the CRUD
+   shape — reshape it with the "Reshaping an existing model" checklist. Then the **intent test**
+   per command (would a business person say this name at this step in the story? an endpoint-shaped
+   name fails), the **question test** per view (write the question it answers; no question, no
+   read model; a child view only when its query needs what the parent view lacks), and the
+   **conditional-invariant signal** (invariants or fields that apply only "if `<field>` is set"
+   mean two intents in one command: split it). The `timeline-entity-clustered`,
+   `command-second-intent` and `automation-split-by-outcome` lints are the mechanical half; the
+   1.18.0 design exit gate is `em validate --shape`. Shape the model first, scaffold docs after: a rename,
+   split or merge from the reshape would orphan docs already wired with `--wire`. The `slice` phase is unchanged (timeline order).
+3. **Elaborate scenarios — first pass (step 6).** Scaffold every slice's doc now, one per
    slice, none skipped: `em slice new "<slice name>" --pattern <state-change|state-view|
    automation|translation> --swimlane "<Persona> → <Context>" --wire <model>.em` writes
    `slices/<slice-name>.md` at `status: draft` (the same command, flags, and `--wire`
@@ -102,7 +116,7 @@ Goal: a structurally complete, **validated** model with correct patterns and swi
    the one-command fast path: a near-free stub per undocumented slice, wired, in slice order
    (MIL-184) — skip the per-slice `em slice new` calls above and deepen individual docs later
    when the team is ready.
-3. **Evaluate completeness (step 7).** Walk the model: every slice is a **complete** pattern, not a
+4. **Evaluate completeness (step 7).** Walk the model: every slice is a **complete** pattern, not a
    half-slice — **every command has something that triggers it**, every command emits an event,
    **every event is read by a read model**, **every read model has a consumer**, every view has a
    source, every UI is reachable, every connection is
@@ -131,7 +145,7 @@ Goal: a structurally complete, **validated** model with correct patterns and swi
    session and stage `contracts/<model key>.tsp` with the model edit — the one derived artifact
    a design session produces, always by the command, never by hand.
 
-4. **Shape exit gate (GH #282).** The model phase ends on the shape lints, not on your judgement
+5. **Shape exit gate (GH #282).** The model phase ends on the shape lints, not on your judgement
    of the storyline: run `em validate <model>.em --shape` (add `--json` to read it; exit code is
    always 0, so read the output). Every finding is either **fixed** in the model, or **accepted**
    as one bullet in `.event-modeling.md` `## Decisions log`:
@@ -141,7 +155,8 @@ Goal: a structurally complete, **validated** model with correct patterns and swi
    count for an estate; it never replaces the bullet. Re-run until each remaining finding has its
    bullet. **Refuse to move to the slice phase otherwise** (`em state set-phase slice` waits): the
    same kind of exit gate as asserting the generated contract above. Do not accept a finding
-   without asking the user for the reason.
+   without asking the user for the reason. The gate runs after doc scaffolding, so update or retire
+   wired docs for renamed, merged or split slices.
 
 End of phase: render, update state (`em state set-phase slice` — the mechanical marker the state
 machine expects), and stop. Every slice already has a draft doc ready to receive the deep spec,
