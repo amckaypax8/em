@@ -6,6 +6,9 @@
 //   model "Name" [owner "Team"[, "Team 2" ...]]
 //   persona Name
 //   context Name
+//   storyline "Name" [source "url"] [after "Other"] {   # groups the slices inside it (GH #277)
+//     slice "Name" [source "url"] { … }
+//   }
 //   slice "Name" [source "url"] {
 //     ui    <free text> [@Persona]
 //     command <free text>
@@ -27,6 +30,7 @@ import {
   InvariantDecl,
   ModelNode,
   SliceNode,
+  StorylineNode,
   TypeDeclNode,
 } from "./ast.js";
 import {
@@ -69,6 +73,7 @@ export function parse(source: string): ModelNode {
     personas: [],
     contexts: [],
     slices: [],
+    storylines: [],
     arrows: [],
     types: [],
     owner: [],
@@ -78,6 +83,8 @@ export function parse(source: string): ModelNode {
   let currentSlice: SliceNode | null = null;
   let currentElement: ElementNode | null = null; // open `{ … }` field block
   let currentTypeDecl: TypeDeclNode | null = null; // open `type Name { … }` block
+  let currentStoryline: StorylineNode | null = null; // open `storyline "Name" { … }` block
+  let storylineIsContinuation = false; // the open block reopens an already-declared storyline
 
   for (let i = 0; i < rawLines.length; i++) {
     const lineNo = i + 1;
@@ -123,7 +130,21 @@ export function parse(source: string): ModelNode {
       }
       if (currentSlice) {
         model.slices.push(currentSlice);
+        if (currentStoryline) currentStoryline.sliceNames.push(currentSlice.name);
         currentSlice = null;
+        continue;
+      }
+      if (currentStoryline) {
+        const trailing = line.slice(1).trim();
+        if (trailing) {
+          throw new ParseError(
+            `unrecognized trailing text after '}': '${trailing}' (storylines support no trailing clauses)`,
+            lineNo,
+          );
+        }
+        if (!storylineIsContinuation) model.storylines.push(currentStoryline);
+        currentStoryline = null;
+        storylineIsContinuation = false;
         continue;
       }
       throw new ParseError("unexpected '}'", lineNo);
@@ -260,8 +281,50 @@ export function parse(source: string): ModelNode {
       continue;
     }
 
+    // Inside a storyline block (outside any slice): only `slice` blocks belong here — storylines
+    // group slices, they don't nest and hold no other declaration (GH #277).
+    if (currentStoryline && keyword !== "slice") {
+      throw new ParseError(
+        keyword === "storyline"
+          ? "storylines do not nest — close the enclosing storyline with '}' first"
+          : `'${keyword}' is not valid inside a storyline (expected 'slice' or '}')`,
+        lineNo,
+      );
+    }
+
     // Top level.
     switch (keyword) {
+      case "storyline": {
+        const open = lastIndexOfUnquoted(remainder, "{");
+        if (open < 0) throw new ParseError("storyline must open a block with '{'", lineNo);
+        if (remainder.slice(open + 1).trim().length > 0) {
+          throw new ParseError("a storyline's '{' must end its line — declare slices on the lines below", lineNo);
+        }
+        const node = parseStorylineHeader(remainder.slice(0, open).trim(), lineNo);
+        const dup = model.storylines.find((s) => s.name.trim().toLowerCase() === node.name.trim().toLowerCase());
+        if (dup) {
+          // A second block with an already-declared name CONTINUES that storyline (its slices
+          // join it, file order preserved). `source`/`after` belong to the first block: a later
+          // block may repeat the same value but never change it.
+          for (const clause of ["source", "after"] as const) {
+            const again = node[clause];
+            if (again !== undefined && again.trim() !== (dup[clause] ?? "").trim()) {
+              throw new ParseError(
+                `storyline-clause-on-continuation: storyline "${dup.name}" (first declared at line ${dup.line}) ` +
+                  (dup[clause] === undefined
+                    ? `declares no \`${clause}\`; a continuation block cannot add one — put it on the first block`
+                    : `declares ${clause} "${dup[clause]}"; a continuation block cannot change it`),
+                lineNo,
+              );
+            }
+          }
+          currentStoryline = dup;
+          storylineIsContinuation = true;
+        } else {
+          currentStoryline = node;
+        }
+        break;
+      }
       case "model": {
         const header = parseModelHeader(remainder, lineNo);
         model.name = header.name;
@@ -297,6 +360,7 @@ export function parse(source: string): ModelNode {
 
         node.name = unquote(header);
         if (!node.name) throw new ParseError("slice requires a name", lineNo);
+        if (currentStoryline) node.storyline = currentStoryline.name;
         currentSlice = node;
         break;
       }
@@ -350,6 +414,12 @@ export function parse(source: string): ModelNode {
       currentSlice.line,
     );
   }
+  if (currentStoryline) {
+    throw new ParseError(
+      `storyline "${currentStoryline.name}" is missing a closing '}'`,
+      currentStoryline.line,
+    );
+  }
   if (!model.name) {
     model.name = DEFAULT_MODEL_NAME;
     model.nameDeclared = false;
@@ -387,6 +457,47 @@ function parseModelHeader(remainder: string, line: number): { name: string; owne
   }
   const name = unquote(nameEnd > 0 ? remainder.slice(0, nameEnd) : clause.rest);
   return { name, owner };
+}
+
+/**
+ * `storyline "Name" [source "url"] [after "Other"]` (GH #277) — the header text before the
+ * block's `{`. The name comes first (quoted, or the bare words before the first clause); the
+ * `source` clause reuses the slice header's `source "url"` grammar and `after` takes a quoted
+ * storyline name. Clauses are order-independent after the name.
+ */
+function parseStorylineHeader(header: string, line: number): StorylineNode {
+  let nameText = header;
+  let tail = "";
+  const quotedName = header.startsWith('"');
+  if (quotedName) {
+    const close = matchQuote(header, 0);
+    if (close < 0) throw new ParseError("unterminated string literal in storyline name", line);
+    nameText = header.slice(0, close + 1);
+    tail = header.slice(close + 1).trim();
+  }
+  const node: StorylineNode = { name: "", sliceNames: [], line };
+  let rest = quotedName ? tail : nameText;
+  const sourceClause = extractQuotedClause(rest, "source", line);
+  if (sourceClause) {
+    node.source = sourceClause.value;
+    rest = sourceClause.rest;
+  }
+  const afterClause = extractQuotedClause(rest, "after", line);
+  if (afterClause) {
+    node.after = afterClause.value;
+    rest = afterClause.rest;
+  }
+  if (quotedName) {
+    if (rest.length > 0) throw new ParseError(`unrecognized text in storyline header: '${rest}'`, line);
+    node.name = unquote(nameText);
+  } else {
+    node.name = unquote(rest);
+  }
+  if (!node.name.trim()) throw new ParseError("storyline requires a name", line);
+  if (node.after !== undefined && !node.after.trim()) {
+    throw new ParseError("`after` needs a non-empty storyline name", line);
+  }
+  return node;
 }
 
 /** One `consumes` ref: `<modelKey>:<event|view>.<slug>` — the same shape

@@ -4,6 +4,7 @@
 
 import { AUTOMATION_KINDS, ElementKind, Field, InvariantDecl, ModelNode, TagClause } from "../parser/ast.js";
 import { dedupe, slug } from "../util/slug.js";
+import { relationOnTimeline } from "./storylines.js";
 
 /** A declared named type (`type Name { … }`) — its own top-level namespace, separate from
  *  elements (a type and an element may share a name without colliding). */
@@ -111,7 +112,26 @@ export interface Slice {
   index: number;
   /** `source "url"` — link to the ticket/conversation this slice traces back to. */
   source?: string;
+  /** Name of the `storyline "…" { … }` block the slice was declared in (GH #277); absent for a
+   *  slice outside any storyline. */
+  storyline?: string;
+  /** True for a stub column of an `em render --storyline` subset diagram (render/
+   *  storylineDiagram.ts): an element the storyline reads from outside it, drawn dimmed so its
+   *  arrows still have a source. Never set on a compiled model's slices. */
+  stub?: boolean;
   elements: Element[];
+  line: number;
+}
+
+/** A `storyline` block (GH #277): a named chapter over a set of slices. */
+export interface Storyline {
+  name: string;
+  /** `source "url"` — the document/ticket this storyline traces back to. */
+  source?: string;
+  /** `after "Other"` as written — the storyline whose end state this one is read as following. */
+  after?: string;
+  /** Indexes (into `NormalizedModel.slices`) of the slices declared inside the block, in order. */
+  sliceIndexes: number[];
   line: number;
 }
 
@@ -135,6 +155,9 @@ export interface NormalizedModel {
   contexts: string[];
   hasAutomation: boolean;
   slices: Slice[];
+  /** `storyline` blocks in document order (GH #277); `[]` for a model that declares none.
+   *  Optional so hand-built models (render/sliceDiagram.ts's extraction) need not carry it. */
+  storylines?: Storyline[];
   elements: Element[];
   byId: Map<string, Element>;
   /** Normalized display name -> elements with that name (across slices). */
@@ -209,6 +232,7 @@ export function normalize(ast: ModelNode): NormalizedModel {
       name: sliceNode.name,
       index: sliceIndex,
       source: sliceNode.source,
+      storyline: sliceNode.storyline,
       elements: [],
       line: sliceNode.line,
     };
@@ -278,7 +302,15 @@ export function normalize(ast: ModelNode): NormalizedModel {
     line: a.line,
   }));
 
-  return {
+  const storylines: Storyline[] = (ast.storylines ?? []).map((st) => ({
+    name: st.name,
+    source: st.source,
+    after: st.after,
+    sliceIndexes: slices.filter((sl) => sl.storyline === st.name).map((sl) => sl.index),
+    line: st.line,
+  }));
+
+  const result: NormalizedModel = {
     name: ast.name,
     nameDeclared: ast.nameDeclared,
     owner: [...ast.owner],
@@ -286,6 +318,7 @@ export function normalize(ast: ModelNode): NormalizedModel {
     contexts,
     hasAutomation,
     slices,
+    storylines,
     elements,
     byId,
     byName,
@@ -293,6 +326,28 @@ export function normalize(ast: ModelNode): NormalizedModel {
     types,
     typesByName,
   };
+
+  // `view X again` continues the instance that is first on the COMPOSED timeline (GH #277): when a
+  // storyline declared `after` another sits above it in the file, the referenced storyline's
+  // instance still precedes it. Only models with an `after` clause can differ from file order.
+  if (storylines.some((st) => st.after !== undefined)) {
+    const groups = new Map<string, Element[]>();
+    for (const el of elements) {
+      if (el.kind !== "view") continue;
+      const key = normalizeName(el.name);
+      const g = groups.get(key);
+      if (g) g.push(el);
+      else groups.set(key, [el]);
+    }
+    for (const group of groups.values()) {
+      let first = group[0];
+      for (const c of group) {
+        if (relationOnTimeline(result, c.sliceIndex, first.sliceIndex) === "before") first = c;
+      }
+      for (const el of group) el.logicalId = first.id;
+    }
+  }
+  return result;
 }
 
 /**
