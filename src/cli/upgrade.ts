@@ -22,7 +22,7 @@
 // repository — same requirement `em conform-scope` holds, for the same reason (there is no
 // "changed since when" or "commit per step" without one).
 
-import { existsSync, readFileSync, realpathSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { findRosterAbove, GRANDFATHERED_RATIFIER } from "../roster/roster.js";
 import { NormalizedModel, PUBLIC_SCALAR_TYPE_NAMES } from "../model/model.js";
@@ -58,9 +58,13 @@ import { findSpecifyRoot, locateConstitution } from "./status.js";
 import { scaffoldConstitution, scaffoldStateFile } from "../templates.js";
 import { loadStateFile, parseState, setEmVersion, ensureOptionalBullets, resolveStateFilePath } from "./stateFile.js";
 import { fieldLineRegex, normalizeFieldValue, locateFrontmatterInner, replaceFieldValue } from "./frontmatterSurgery.js";
-import { ratifiedHashScope, sliceDocBodyHash } from "../catalog/sliceDoc.js";
+import { parseSliceDoc, ratifiedHashScope, sliceDocBodyHash } from "../catalog/sliceDoc.js";
 import { QueuedItem } from "../catalog/deferQueue.js";
-import { applyDeferOrAppend, drainQueueInState, finishSignedDocEdit, isSignedDoc, readQueue } from "./defer.js";
+import { applyDeferOrAppend, drainQueueInState, finishSignedDocEdit, isSignedDoc, readQueue, rewriteParkingLotFragments } from "./defer.js";
+import { runSliceSync } from "./sliceSync.js";
+import { runSliceIndex } from "./sliceIndex.js";
+import { planCollapseAlternativeEvents, planFoldContinuations, planStackContinuations } from "./upgradeReshape.js";
+import { observeSigners } from "../roster/init.js";
 import { STATE_FILE_NAME } from "./stateFile.js";
 import { localIsoDate } from "../util/localDate.js";
 import { compile } from "../pipeline.js";
@@ -82,6 +86,10 @@ export interface UpgradeContext {
   packagedAgentsRoot?: string;
   model: NormalizedModel;
   refs: RefsResult;
+  /** `--fold-continuations`: apply the opt-in `fold-continuations` step (default form: stack). */
+  foldContinuations?: boolean;
+  /** `--to-sugar` (implies `--fold-continuations`): fold into the host command slice instead. */
+  toSugar?: boolean;
 }
 
 export interface StepDetection {
@@ -93,9 +101,9 @@ export interface StepDetection {
   human?: boolean;
 }
 
-export type StepApplyOutcome = { ok: true; changedFiles: string[] } | { ok: false; message: string };
+export type StepApplyOutcome = { ok: true; changedFiles: string[]; notes?: string[] } | { ok: false; message: string };
 
-export type UpgradeStepId = "skill-bundle" | "skill-plugin" | "reaction-shape" | "state-file" | "ci-block" | "constitution" | "ratified-signoff" | "ratified-hash-scope" | "system-manifest";
+export type UpgradeStepId = "skill-bundle" | "skill-plugin" | "reaction-shape" | "state-file" | "ci-block" | "constitution" | "ratified-signoff" | "ratified-hash-scope" | "collapse-alternative-events" | "fold-continuations" | "view-doc-sources-stale" | "slice-index-stale" | "parking-lot-fragments" | "system-manifest";
 
 export interface UpgradeStepDef {
   id: UpgradeStepId;
@@ -105,6 +113,8 @@ export interface UpgradeStepDef {
   sinceVersion: string;
   detect(ctx: UpgradeContext): StepDetection;
   apply(ctx: UpgradeContext): StepApplyOutcome;
+  /** Opt-in steps are detected and listed by every run but applied only when this returns true. */
+  optedIn?(ctx: UpgradeContext): boolean;
 }
 
 // ---- Step 1: skill-bundle — delegates to `em skill sync`'s own plan/apply. ----
@@ -625,6 +635,322 @@ function applyRatifiedHashScope(ctx: UpgradeContext): StepApplyOutcome {
   return { ok: true, changedFiles };
 }
 
+// ---- Step 8-: collapse-alternative-events (GH #290 / #278) and fold-continuations (GH #290 / #287) ----
+// The two steps that rewrite the `.em` itself (planned by upgradeReshape.ts: text surgery, verified by
+// recompiling before anything is written). They run before the doc/index steps, which re-read the
+// model `applyUpgrade` recompiles after each step. `fold-continuations` is OPT-IN (see below).
+
+function readModelText(ctx: UpgradeContext): string {
+  return readFileSync(ctx.modelFile, "utf8");
+}
+
+function freshCompile(ctx: UpgradeContext): { model: NormalizedModel; refs: RefsResult } | null {
+  try {
+    const c = compile(readModelText(ctx));
+    return { model: c.model, refs: c.refs };
+  } catch {
+    return null;
+  }
+}
+
+/** Signed docs (ratified or shipped) whose generated regions would be stale against `nextText`, i.e. that
+ *  a rewrite leaves behind a signature the regions no longer match. Read-only. */
+function signedDocsStaleAfter(ctx: UpgradeContext, nextText: string): string[] {
+  const staleSigned = (src: string): Map<string, string> => {
+    const out = new Map<string, string>();
+    let c;
+    try {
+      c = compile(src);
+    } catch {
+      return out;
+    }
+    const r = runSliceSync(c.model, c.refs, ctx.baseDir, undefined, true);
+    if (!r.ok) return out;
+    for (const d of r.docs) {
+      if (d.status === "stale" && isSignedDoc(readFileSync(join(ctx.baseDir, d.path), "utf8"))) {
+        out.set(d.path, `${d.path} (${d.regions.filter((g) => g.status === "stale").map((g) => g.name).join(", ")})`);
+      }
+    }
+    return out;
+  };
+  const before = staleSigned(readModelText(ctx));
+  return [...staleSigned(nextText)].filter(([path]) => !before.has(path)).map(([, label]) => label); // newly stale only
+}
+
+const CARRIED_SECTIONS = /^##\s+(Scenarios|Invariants|Open Questions|Decisions(?: log)?)\s*$/i;
+
+/** Sections of a retiring doc whose AUTHORED content a human must carry to the kept doc (generated
+ *  regions are rebuilt from the model, so they are not content). */
+function carriedSections(raw: string): string[] {
+  const body = raw.replace(/<!-- GENERATED:[^>]*:start[^>]*-->[\s\S]*?<!-- GENERATED:[^>]*:end -->/g, "");
+  const lines = body.split("\n");
+  const found: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = CARRIED_SECTIONS.exec(lines[i]);
+    if (!m) continue;
+    let j = i + 1;
+    let content = false;
+    for (; j < lines.length && !/^#{1,2}\s/.test(lines[j]); j++) if (lines[j].trim() !== "" && !lines[j].includes("{{")) content = true;
+    if (content) found.push(m[1]);
+  }
+  return found;
+}
+
+/** Where a collapsed slice's retired doc goes: beside the model, outside `slices/` (so it is not an
+ *  orphaned slice doc), keeping its file name. */
+const ARCHIVE_DIR = join("archive", "slices");
+
+interface RetiredDoc {
+  from: string;
+  to: string;
+  key: string;
+  keptKey: string;
+  /** The doc the kept slice binds (cross-binding aware), and its version — null when it has none. */
+  keptDoc: string | null;
+  keptVersion: number | null;
+  retiredVersion: number;
+  text: string;
+  carried: string[];
+}
+
+function retiredDocs(ctx: UpgradeContext, groups: Array<{ keys: string[] }>): RetiredDoc[] {
+  const out: RetiredDoc[] = [];
+  const refOf = elementRefOf(ctx);
+  const joinOf = (key: string) => {
+    const i = ctx.refs.sliceKeys.indexOf(key);
+    return i === -1 ? null : resolveSliceDocJoin(ctx.model, ctx.refs, ctx.model.slices[i], key, ctx.baseDir, refOf).doc;
+  };
+  for (const g of groups) {
+    const kept = joinOf(g.keys[0]);
+    const keptDoc = kept && kept.found && kept.reason === null ? kept.path : null;
+    const keptVersion = kept && keptDoc ? kept.version : null;
+    for (const key of g.keys.slice(1)) {
+      const bound = joinOf(key);
+      const rel = bound && bound.found && bound.reason === null ? bound.path : `slices/${key}.md`;
+      const from = join(ctx.baseDir, rel);
+      if (!existsSync(from) || (keptDoc !== null && rel === keptDoc)) continue;
+      const raw = readFileSync(from, "utf8");
+      const range = locateFrontmatterInner(raw);
+      const retiredVersion = Number(/^version:\s*(\d+)/m.exec(raw)?.[1] ?? "1");
+      const target = keptDoc !== null ? basename(keptDoc, ".md") : g.keys[0];
+      let next = raw;
+      if (range) {
+        const fenceEnd = raw.indexOf("\n", range.innerEnd) + 1 || raw.length;
+        const banner = `\n> **SUPERSEDED** by \`${target}\` (\`superseded-by\`): this slice was collapsed into one recording alternative events (GH #278). Kept for history; fold anything worth keeping into \`${keptDoc ?? `slices/${g.keys[0]}.md`}\`.\n`;
+        next = raw.slice(0, range.innerEnd) + `superseded-by: ${target}@v${keptVersion ?? 1}\n` + raw.slice(range.innerEnd, fenceEnd) + banner + raw.slice(fenceEnd);
+      }
+      out.push({ from, to: join(ctx.baseDir, ARCHIVE_DIR, basename(rel)), key, keptKey: g.keys[0], keptDoc, keptVersion, retiredVersion, text: next, carried: carriedSections(raw) });
+    }
+  }
+  return out;
+}
+
+function carriedNotes(retired: RetiredDoc[]): string[] {
+  return retired.filter((r) => r.carried.length > 0).map((r) => `${ARCHIVE_DIR}/${basename(r.to)} holds ${r.carried.join(", ")} — fold these into ${r.keptDoc ?? `slices/${r.keptKey}.md`}`);
+}
+
+function detectCollapseAlternativeEvents(ctx: UpgradeContext): StepDetection {
+  const fresh = freshCompile(ctx);
+  const plan = fresh ? planCollapseAlternativeEvents(fresh.model, fresh.refs, readModelText(ctx)) : null;
+  if (plan === null) return { applicable: false, reason: "no run of adjacent slices repeats one command and differs only in the recorded event" };
+  const desc = plan.groups.map((g) => `${g.slices.map((n) => `"${n}"`).join(" + ")} → "${g.slices[0]}" recording ${g.form === "inline" ? g.events.join(" | ") : `oneof { ${g.events.join(", ")} }`}`);
+  const retired = retiredDocs(ctx, plan.groups);
+  const notes = carriedNotes(retired);
+  const stale = signedDocsStaleAfter(ctx, plan.next);
+  return {
+    applicable: true,
+    reason:
+      `${plan.groups.length} run(s) of repeated-command slices collapse to alternative events: ${desc.join("; ")} — em upgrade will rewrite them (the first slice's key is kept; the others' docs move to ${ARCHIVE_DIR}/ with superseded-by and a SUPERSEDED banner, and the kept doc gains merged-from)` +
+      (notes.length > 0 ? `; ${notes.join("; ")}` : "") +
+      (stale.length > 0 ? `; signed doc(s) will not be synced and go stale: ${stale.join(", ")} — em slice revise <key>, then em slice sync` : ""),
+  };
+}
+
+/** Frontmatter-only edit: adds `key: value` before the closing fence (a no-op without frontmatter). */
+function addFrontmatterLine(raw: string, line: string): string {
+  const range = locateFrontmatterInner(raw);
+  return range ? raw.slice(0, range.innerEnd) + line + "\n" + raw.slice(range.innerEnd) : raw;
+}
+
+function applyCollapseAlternativeEvents(ctx: UpgradeContext): StepApplyOutcome {
+  const fresh = freshCompile(ctx);
+  const text = readModelText(ctx);
+  const plan = fresh ? planCollapseAlternativeEvents(fresh.model, fresh.refs, text) : null;
+  if (plan === null) return { ok: false, message: "the model no longer collapses cleanly" };
+  const changed = [ctx.modelFile];
+  const retired = retiredDocs(ctx, plan.groups); // computed on the OLD model (joins, versions)
+  const notes = carriedNotes(retired);
+  writeFileSync(ctx.modelFile, plan.next, "utf8");
+  for (const r of retired) {
+    mkdirSync(dirname(r.to), { recursive: true });
+    writeFileSync(r.to, r.text, "utf8");
+    rmSync(r.from);
+    changed.push(r.from, r.to);
+  }
+  // Lineage back-link on the kept doc: `merged-from: <retired>@v<N>` (frontmatter only, outside the
+  // ratified hash). A SIGNED kept doc is not touched; `lineage-backlink-missing` lists it.
+  for (const r of retired) {
+    if (r.keptDoc === null) continue;
+    const abs = join(ctx.baseDir, r.keptDoc);
+    const raw = readFileSync(abs, "utf8");
+    if (isSignedDoc(raw)) continue;
+    const ref = `${basename(r.to, ".md")}@v${r.retiredVersion}`;
+    const existing = /^merged-from:\s*(.*)$/m.exec(raw);
+    const next = existing ? raw.replace(/^merged-from:\s*(.*)$/m, (_m, v) => `merged-from: ${String(v).trim() === "" ? ref : `${String(v).trim()}, ${ref}`}`) : addFrontmatterLine(raw, `merged-from: ${ref}`);
+    writeFileSync(abs, next, "utf8");
+    if (!changed.includes(abs)) changed.push(abs);
+  }
+  // Regenerate the kept slice's event region (one `Records one of:` region now) unless its doc is signed
+  // (then `slice-doc-stale-signed` is the human item that says what to do).
+  const after = freshCompile(ctx);
+  if (after) {
+    for (const g of plan.groups) {
+      const kept = retired.find((r) => r.keptKey === g.keys[0])?.keptDoc ?? `slices/${g.keys[0]}.md`;
+      const doc = join(ctx.baseDir, kept);
+      if (existsSync(doc) && !isSignedDoc(readFileSync(doc, "utf8"))) {
+        const r = runSliceSync(after.model, after.refs, ctx.baseDir, g.keys[0], false);
+        if (r.ok && r.docs.some((d) => d.status === "synced") && !changed.includes(doc)) changed.push(doc);
+      }
+    }
+  }
+  return { ok: true, changedFiles: changed, notes };
+}
+
+// ---- fold-continuations is OPT-IN (`em upgrade --apply --fold-continuations`) ----
+// Default form (a): consecutive continuations of ONE view stack into the first slice (its key, name,
+// `continuationOf`, doc join and index row stay). `--to-sugar` instead moves them into the host
+// command slice as `view X again … shown on` lines; that CHANGES `continuationOf` and the doc join to
+// the host (`<host>--again`) and removes the index rows.
+
+const FOLD_FLAG = "em upgrade --apply --fold-continuations";
+
+function foldPlan(ctx: UpgradeContext): { kind: "stack"; plan: ReturnType<typeof planStackContinuations> } | { kind: "sugar"; plan: ReturnType<typeof planFoldContinuations> } {
+  const fresh = freshCompile(ctx);
+  if (!fresh) return { kind: "stack", plan: null };
+  const text = readModelText(ctx);
+  return ctx.toSugar === true
+    ? { kind: "sugar", plan: planFoldContinuations(fresh.model, fresh.refs, text) }
+    : { kind: "stack", plan: planStackContinuations(fresh.model, fresh.refs, text) };
+}
+
+function detectFoldContinuations(ctx: UpgradeContext): StepDetection {
+  const f = foldPlan(ctx);
+  if (f.plan === null) return { applicable: false, reason: "no consecutive hand-named continuation slices of one view (stack) — or, with --to-sugar, no continuation directly after its host command — in a foldable shape" };
+  if (f.kind === "sugar" && (f.plan as NonNullable<ReturnType<typeof planFoldContinuations>>).groups.length === 0) {
+    const r = (f.plan as NonNullable<ReturnType<typeof planFoldContinuations>>).refused;
+    return { applicable: false, reason: `--to-sugar: nothing folded; refused: ${r.map((x) => `${x.hostKey} (${x.reason})`).join("; ")}` };
+  }
+  const optIn = ctx.foldContinuations === true || ctx.toSugar === true;
+  const prefix = optIn ? "" : `OPT-IN, not applied by a plain --apply (run \`${FOLD_FLAG}\`): `;
+  const stale = signedDocsStaleAfter(ctx, f.plan.next);
+  const staleNote = stale.length > 0 ? `; signed doc(s) whose generated regions (e.g. the view's \`via\` annotations) go stale and will not be synced: ${stale.join(", ")} — em slice revise <key>, then em slice sync` : "";
+  if (f.kind === "stack") {
+    const p = f.plan as NonNullable<ReturnType<typeof planStackContinuations>>;
+    const desc = p.groups.map((g) => `${[g.kept, ...g.dropped].map((n) => `"${n}"`).join(" + ")} → one continuation slice "${g.kept}" (key ${g.keptKey} kept; dropped keys: ${g.droppedKeys.join(", ")})`);
+    const skipped = p.skipped.length > 0 ? `; left unstacked: ${p.skipped.map((s) => `${s.key} (${s.reason})`).join(", ")}` : "";
+    return { applicable: true, reason: `${prefix}${desc.join("; ")} — continuationOf, the doc join and the kept key's index row are unchanged${skipped}${staleNote}` };
+  }
+  const p = f.plan as NonNullable<ReturnType<typeof planFoldContinuations>>;
+  const desc = p.groups.map((g) => `${g.folded.map((n) => `"${n}"`).join(" + ")} (keys ${g.foldedKeys.join(", ")}) → \`view … again\` lines in "${g.host}" (column ${g.hostKey}--again)`);
+  const refusedNote = p.refused.length > 0 ? `; refused: ${p.refused.map((x) => `${x.hostKey} (${x.reason})`).join("; ")}` : "";
+  return { applicable: true, reason: `${prefix}--to-sugar: ${desc.join("; ")}${refusedNote} — CHANGES continuationOf and the doc join to the host (${p.groups.map((g) => `${g.hostKey}--again`).join(", ")}) and removes the index rows of ${p.groups.flatMap((g) => g.foldedKeys).join(", ")} (a stray own doc of a folded slice is left alone)${staleNote}` };
+}
+
+function applyFoldContinuations(ctx: UpgradeContext): StepApplyOutcome {
+  const f = foldPlan(ctx);
+  if (f.plan === null || ("groups" in f.plan && f.plan.groups.length === 0)) return { ok: false, message: "the model no longer folds cleanly" };
+  writeFileSync(ctx.modelFile, f.plan.next, "utf8");
+  return { ok: true, changedFiles: [ctx.modelFile] };
+}
+
+// ---- Step 8a: view-doc-sources-stale (GH #290 / #280) — view regions list the union of `from`. ----
+// 1.18.0's generated `em-slice-view` region lists the UNION of `from` across a read model's `again`
+// instances (GH #280), so a doc generated under 1.17 states an origin-only "built from" line. This
+// step is `em slice sync`'s own check/apply, narrowed to docs whose VIEW region is stale. A SIGNED
+// doc (ratified or shipped) is reported and left alone: regenerating its region would move its
+// `ratifiedHash` — open the next draft (`em slice revise`) and sync there.
+
+type StaleDoc = { key: string; path: string };
+
+function staleViewDocs(ctx: UpgradeContext): { open: StaleDoc[]; signed: StaleDoc[] } {
+  const open: StaleDoc[] = [];
+  const signed: StaleDoc[] = [];
+  const r = runSliceSync(ctx.model, ctx.refs, ctx.baseDir, undefined, true);
+  if (!r.ok) return { open, signed };
+  for (const d of r.docs) {
+    if (d.status !== "stale" || !d.regions.some((g) => g.status === "stale" && g.name.startsWith("em-slice-view"))) continue;
+    (isSignedDoc(readFileSync(join(ctx.baseDir, d.path), "utf8")) ? signed : open).push({ key: d.key, path: d.path });
+  }
+  return { open, signed };
+}
+
+function detectViewDocSourcesStale(ctx: UpgradeContext): StepDetection {
+  const { open, signed } = staleViewDocs(ctx);
+  const left = signed.length > 0 ? `; left alone (ratified or shipped — em slice revise, then em slice sync): ${signed.map((d) => d.path).join(", ")}` : "";
+  if (open.length === 0) {
+    return { applicable: false, reason: `no bound slice doc's view region is stale against the model${left}` };
+  }
+  return {
+    applicable: true,
+    reason: `em slice sync --check would change the view region of ${open.length} doc(s): ${open.map((d) => d.path).join(", ")} — em upgrade will run em slice sync on them${left}`,
+  };
+}
+
+function applyViewDocSourcesStale(ctx: UpgradeContext): StepApplyOutcome {
+  const { open } = staleViewDocs(ctx);
+  const changedFiles: string[] = [];
+  for (const d of open) {
+    const r = runSliceSync(ctx.model, ctx.refs, ctx.baseDir, d.key, false);
+    if (!r.ok) return { ok: false, message: r.message };
+    changedFiles.push(join(ctx.baseDir, d.path));
+  }
+  return { ok: true, changedFiles };
+}
+
+// ---- Step 8b: slice-index-stale (GH #290 / #275) — the README Slices table. ----
+
+function detectSliceIndexStale(ctx: UpgradeContext): StepDetection {
+  const r = runSliceIndex(ctx.model, ctx.refs, ctx.modelFile, true);
+  if (r.ok) return { applicable: false, reason: "the README Slices table is current" };
+  if (r.kind === "stale") return { applicable: true, reason: `${join(ctx.baseDir, "README.md")}'s Slices table is stale (em slice index --check) — em upgrade will regenerate it` };
+  return { applicable: false, reason: r.kind === "missing-readme" ? "no README.md beside the model — nothing to index" : "README.md has no GENERATED:slices markers — nothing to index" };
+}
+
+function applySliceIndexStale(ctx: UpgradeContext): StepApplyOutcome {
+  const r = runSliceIndex(ctx.model, ctx.refs, ctx.modelFile, false);
+  if (!r.ok) return { ok: false, message: r.message };
+  return { ok: true, changedFiles: r.wrote ? [r.readmePath] : [] };
+}
+
+// ---- Step 8c: parking-lot-fragments (GH #290 / #283) — substring bullets become the item's label. ----
+
+function parkingLotDocs(ctx: UpgradeContext): Map<string, string> {
+  const docs = new Map<string, string>();
+  for (const d of nonContinuationDocs(ctx)) {
+    const file = join(ctx.baseDir, d.path);
+    if (d.path !== "" && existsSync(file)) docs.set(d.key, readFileSync(file, "utf8"));
+  }
+  return docs;
+}
+
+function detectParkingLotFragments(ctx: UpgradeContext): StepDetection {
+  const statePath = join(ctx.baseDir, STATE_FILE_NAME);
+  if (!existsSync(statePath)) return { applicable: false, reason: `no ${STATE_FILE_NAME} beside the model` };
+  const { rewrites } = rewriteParkingLotFragments(readFileSync(statePath, "utf8"), parkingLotDocs(ctx));
+  if (rewrites.length === 0) return { applicable: false, reason: "no parking-lot bullet is a fragment of an Open Questions item" };
+  return {
+    applicable: true,
+    reason: `${rewrites.length} parking-lot bullet(s) hold a fragment of an Open Questions item (the pre-1.18 em slice defer shape): ${rewrites.map((r) => `"${r.from}" → "${r.to}"`).join("; ")} — em upgrade will rewrite each to the item's label`,
+  };
+}
+
+function applyParkingLotFragments(ctx: UpgradeContext): StepApplyOutcome {
+  const statePath = join(ctx.baseDir, STATE_FILE_NAME);
+  const { content } = rewriteParkingLotFragments(readFileSync(statePath, "utf8"), parkingLotDocs(ctx));
+  writeFileSync(statePath, content, "utf8");
+  return { ok: true, changedFiles: [statePath] };
+}
+
 // ---- Step 8: system-manifest (MIL-235, R3) — system.yaml 1.0 -> 2.0. ----
 // The one mechanical step that writes OTHER models' files: the legacy manifest's seams become
 // `consumes` clauses on each consuming translation and its owners become `owner "…"` on each
@@ -720,6 +1046,11 @@ export const UPGRADE_STEPS: readonly UpgradeStepDef[] = [
   { id: "constitution", sinceVersion: "1.11.0", detect: detectConstitution, apply: applyConstitution },
   { id: "ratified-signoff", sinceVersion: "1.14.0", detect: detectRatifiedSignoff, apply: applyRatifiedSignoff },
   { id: "ratified-hash-scope", sinceVersion: "1.17.0", detect: detectRatifiedHashScope, apply: applyRatifiedHashScope },
+  { id: "collapse-alternative-events", sinceVersion: "1.18.0", detect: detectCollapseAlternativeEvents, apply: applyCollapseAlternativeEvents },
+  { id: "fold-continuations", sinceVersion: "1.18.0", detect: detectFoldContinuations, apply: applyFoldContinuations, optedIn: (c) => c.foldContinuations === true || c.toSugar === true },
+  { id: "view-doc-sources-stale", sinceVersion: "1.18.0", detect: detectViewDocSourcesStale, apply: applyViewDocSourcesStale },
+  { id: "slice-index-stale", sinceVersion: "1.18.0", detect: detectSliceIndexStale, apply: applySliceIndexStale },
+  { id: "parking-lot-fragments", sinceVersion: "1.18.0", detect: detectParkingLotFragments, apply: applyParkingLotFragments },
   { id: "system-manifest", sinceVersion: "1.14.0", detect: detectSystemManifest, apply: applySystemManifest },
 ];
 
@@ -733,7 +1064,12 @@ export type HumanItemId =
   | "unratified-constitution"
   | "predates-1.6"
   | "public-field-types-unresolved"
-  | "plugin-install-locally";
+  | "plugin-install-locally"
+  | "slice-doc-stale-signed"
+  | "lineage-backlink-missing"
+  | "fold-continuations-opt-in"
+  | "shared-event-now-legal"
+  | "roster-not-initialised";
 
 export interface HumanItem {
   id: HumanItemId;
@@ -866,6 +1202,92 @@ function detectPluginInstallLocally(ctx: UpgradeContext): HumanItem | null {
   return null;
 }
 
+/** GH #290: a SIGNED doc (ratified or shipped) whose generated regions are stale against the model —
+ *  `view-doc-sources-stale` and `collapse-alternative-events` leave it alone because syncing would move
+ *  its `ratifiedHash`. Raised for any region (view, event, command, invariants). */
+function detectSliceDocStaleSigned(ctx: UpgradeContext): HumanItem | null {
+  const r = runSliceSync(ctx.model, ctx.refs, ctx.baseDir, undefined, true);
+  if (!r.ok) return null;
+  const docs = r.docs.filter((d) => d.status === "stale" && isSignedDoc(readFileSync(join(ctx.baseDir, d.path), "utf8")));
+  if (docs.length === 0) return null;
+  return {
+    id: "slice-doc-stale-signed",
+    reason: `${docs.map((d) => `${d.path} (${d.regions.filter((g) => g.status === "stale").map((g) => g.name).join(", ")})`).join("; ")} — ratified or shipped and stale against the model; run \`em slice revise ${docs.map((d) => d.key).join(" / ")}\`, then \`em slice sync\``,
+  };
+}
+
+/** GH #290 / #278: a retired doc under archive/slices/ names its successor in `superseded-by`, but the
+ *  successor (a signed doc `em upgrade` did not touch) lacks the `merged-from` back-link. */
+function detectLineageBacklinkMissing(ctx: UpgradeContext): HumanItem | null {
+  const dir = join(ctx.baseDir, ARCHIVE_DIR);
+  if (!existsSync(dir)) return null;
+  const missing: string[] = [];
+  for (const f of readdirSync(dir).filter((n) => n.endsWith(".md")).sort()) {
+    const retired = parseSliceDoc(readFileSync(join(dir, f), "utf8"));
+    for (const ref of retired.supersededBy) {
+      if (!ref.sliceKey) continue;
+      const target = join(ctx.baseDir, "slices", `${ref.sliceKey}.md`);
+      if (!existsSync(target)) continue;
+      const doc = parseSliceDoc(readFileSync(target, "utf8"));
+      const key = basename(f, ".md");
+      if (!doc.mergedFrom.some((m) => m.sliceKey === key)) missing.push(`slices/${ref.sliceKey}.md needs merged-from: ${key}@v${retired.version ?? 1}`);
+    }
+  }
+  if (missing.length === 0) return null;
+  return { id: "lineage-backlink-missing", reason: `${missing.join("; ")} (the doc is signed or was edited since; add the line to its frontmatter — it is outside the ratified hash)` };
+}
+
+/** GH #290 / #287: `fold-continuations` is detected and listed by every run but needs the flag. */
+function detectFoldContinuationsOptIn(ctx: UpgradeContext): HumanItem | null {
+  if (ctx.foldContinuations === true || ctx.toSugar === true) return null;
+  const d = detectFoldContinuations(ctx);
+  return d.applicable ? { id: "fold-continuations-opt-in", reason: d.reason } : null;
+}
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+  return 0;
+}
+
+/** The version the repo is upgrading FROM (recorded `Em version:` bullet, else inferred). */
+function recordedFromVersion(ctx: UpgradeContext): string {
+  const loaded = loadStateFile(ctx.baseDir);
+  let recorded: string | null = null;
+  if (loaded.ok) {
+    const parsed = parseState(loaded.text);
+    if (parsed.ok) recorded = parsed.state.emVersion;
+  }
+  return resolveFromVersion(ctx, recorded).version;
+}
+
+/** GH #290 / #259: signatures are a human decision, so the roster is never generated silently. */
+function detectRosterNotInitialised(ctx: UpgradeContext): HumanItem | null {
+  if (findRosterAbove(ctx.baseDir) !== null) return null;
+  const { ratifiers } = observeSigners(ctx.model, ctx.refs, ctx.baseDir);
+  if (ratifiers.length === 0) return null;
+  return {
+    id: "roster-not-initialised",
+    reason: `${ratifiers.length} ratifier(s) have signed slice docs (${ratifiers.join(", ")}) and there is no ratifiers.yaml — decide who may sign, then run \`em roster init ${basename(ctx.modelFile)}\` to seed one from those names and review it before committing`,
+  };
+}
+
+
+/** GH #290 / #279: information only. Since 1.18.0 the same event recorded by several commands (same
+ *  name and context) is one logical event and `duplicate-name` no longer fires; nothing to change. */
+function detectSharedEventNowLegal(ctx: UpgradeContext): HumanItem | null {
+  // The transition only: a repo already stamped 1.18.0+ has seen this note.
+  if (compareVersions(recordedFromVersion(ctx), "1.18.0") >= 0) return null;
+  const shared = new Set<string>();
+  for (const el of ctx.model.elements) if (el.kind === "event" && el.logicalId !== el.id) shared.add(el.name);
+  if (shared.size === 0) return null;
+  return {
+    id: "shared-event-now-legal",
+    reason: `information only: ${[...shared].join(", ")} ${shared.size === 1 ? "is" : "are"} recorded by more than one command — legal since 1.18.0 (one logical event; duplicate-name no longer fires), no model change needed`,
+  };
+}
+
 const HUMAN_DETECTORS: ReadonlyArray<(ctx: UpgradeContext) => HumanItem | null> = [
   detectNoModelVersion,
   detectContinuationHasOwnDoc,
@@ -875,6 +1297,11 @@ const HUMAN_DETECTORS: ReadonlyArray<(ctx: UpgradeContext) => HumanItem | null> 
   detectPredates16,
   detectPublicFieldTypesUnresolved,
   detectPluginInstallLocally,
+  detectSliceDocStaleSigned,
+  detectLineageBacklinkMissing,
+  detectFoldContinuationsOptIn,
+  detectSharedEventNowLegal,
+  detectRosterNotInitialised,
 ];
 
 export function detectHumanItems(ctx: UpgradeContext): HumanItem[] {
@@ -976,6 +1403,8 @@ export interface StepReport {
   applicable: boolean;
   human: boolean;
   reason: string;
+  /** Present (true) for an opt-in step that is detected but not opted into by this run's flags: listed, never applied. */
+  optIn?: boolean;
 }
 
 export interface UpgradeReport {
@@ -1004,7 +1433,8 @@ export function detectUpgrade(ctx: UpgradeContext): UpgradeReport {
   const from = resolveFromVersion(ctx, recorded);
   const steps: StepReport[] = UPGRADE_STEPS.map((s) => {
     const d = s.detect(ctx);
-    return { id: s.id, sinceVersion: s.sinceVersion, applicable: d.applicable, human: d.human === true, reason: d.reason };
+    const optIn = s.optedIn !== undefined && !s.optedIn(ctx) && d.applicable;
+    return { id: s.id, sinceVersion: s.sinceVersion, applicable: d.applicable, human: d.human === true, reason: d.reason, ...(optIn ? { optIn: true } : {}) };
   });
   const human = detectHumanItems(ctx);
 
@@ -1016,6 +1446,8 @@ export interface ApplyStepResult {
   applied: boolean;
   changedFiles: string[];
   commit: string | null;
+  /** What a human must still do for this step (e.g. content of a retired doc to carry over). */
+  notes?: string[];
 }
 
 export type ApplyUpgradeResult =
@@ -1056,6 +1488,10 @@ export function applyUpgrade(ctx: UpgradeContext, runGit: GitRunner = realGit): 
       applied.push({ id: step.id, applied: false, changedFiles: [], commit: null });
       continue;
     }
+    if (step.optedIn && !step.optedIn(ctx)) {
+      applied.push({ id: step.id, applied: false, changedFiles: [], commit: null });
+      continue;
+    }
     const result = step.apply(ctx);
     if (!result.ok) {
       gitDiscardAll(ctx.repoRoot, runGit);
@@ -1066,9 +1502,18 @@ export function applyUpgrade(ctx: UpgradeContext, runGit: GitRunner = realGit): 
     if (!commitResult.ok) {
       return { ok: false, message: `em upgrade: step "${step.id}" applied but failed to commit — ${commitResult.message}`, report, applied };
     }
-    applied.push({ id: step.id, applied: true, changedFiles: result.changedFiles, commit: message });
+    applied.push({ id: step.id, applied: true, changedFiles: result.changedFiles, commit: message, ...(result.notes && result.notes.length > 0 ? { notes: result.notes } : {}) });
+    // A step may have rewritten the model (or its docs): later steps must see the new one.
+    const fresh = freshCompile(ctx);
+    if (fresh) {
+      ctx.model = fresh.model;
+      ctx.refs = fresh.refs;
+    }
   }
 
+  // The pre-apply human list can be stale (a rewritten model, a doc now out of sync): report the upgraded
+  // repo's, computed before the `Em version:` stamp so transition-only notes still show.
+  report.human = detectHumanItems(ctx);
   const loaded = loadStateFile(ctx.baseDir);
   let emVersionCommit: string | null = null;
   if (loaded.ok) {

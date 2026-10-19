@@ -177,6 +177,7 @@ import {
   CiFileStatus,
 } from "./cli/ciInit.js";
 import { UpgradeContext, resolveRepoRoot, detectUpgrade, applyUpgrade, checkUpgrade } from "./cli/upgrade.js";
+import { buildStorylineSuggestion } from "./cli/storylineSuggest.js";
 import { buildUpgradeJson } from "./emit/upgradeJson.js";
 import { isOlder } from "./util/semver.js";
 import { RULES, RuleCode } from "./model/rules.js";
@@ -3713,6 +3714,34 @@ ci.command("init")
     }
   });
 
+const storylineCmd = program.command("storyline").description("storyline blocks (GH #277): advisory helpers for adopting them");
+
+storylineCmd
+  .command("suggest")
+  .description(
+    "advisory (GH #290): propose `storyline` blocks for a model that has none — one per distinct slice " +
+      "`source \"url\"`, the remaining slices grouped by the view-instance chains (`again`) they feed — " +
+      "printed as a unified diff on stdout (apply with `patch -p1` or `git apply`); never writes the model",
+  )
+  .argument("<file>", "input .em model file")
+  .action((file: string) => {
+    const { model, diagnostics, source: text } = compileFile(file);
+    printDiagnostics(diagnostics);
+    const s = buildStorylineSuggestion(model, text, file);
+    if (s.patch === "") {
+      console.error(`em storyline suggest: nothing to propose for ${file}`);
+      return;
+    }
+    for (const st of s.storylines) {
+      console.error(`storyline "${st.name}" — ${st.sliceIndexes.length} slice(s), from ${st.basis === "source" ? `source ${st.source}` : "a view-instance chain"}`);
+    }
+    if (s.ungrouped.length > 0) {
+      console.error(`left outside every storyline (${s.ungrouped.length}): ${s.ungrouped.map((i) => model.slices[i].name).join(", ")}`);
+    }
+    console.error("review the patch below and apply it by hand — nothing was written");
+    process.stdout.write(s.patch);
+  });
+
 program
   .command("upgrade")
   .description(
@@ -3726,7 +3755,13 @@ program
   .option("--apply", "apply every applicable mechanical step, one git commit each, then a final `Em version:` commit")
   .option("--check", "exit non-zero only on a hard incompatibility (an existing but unparseable state file, an un-migratable .em shape) — writes nothing; what CI runs; the final line says why")
   .option("--json", "print a JSON document instead of text (dry-run/--check only, never with --apply)")
-  .action((file: string, opts: { apply?: boolean; check?: boolean; json?: boolean }) => {
+  .option("--fold-continuations", "also run the opt-in fold-continuations step (stack consecutive continuations of one view into the first; continuationOf, doc join and index rows unchanged)")
+  .option("--to-sugar", "(implies --fold-continuations; without --apply it is a dry run listing exactly what would fold): fold continuations into their host command slice as `view X again … shown on` lines — CHANGES continuationOf and the doc join to `<host>--again` and removes the folded slices' index rows")
+  .action((file: string, opts: { apply?: boolean; check?: boolean; json?: boolean; foldContinuations?: boolean; toSugar?: boolean }) => {
+    if ((opts.foldContinuations || opts.toSugar) && opts.check) {
+      console.error("em upgrade: --fold-continuations / --to-sugar do not combine with --check");
+      process.exit(1);
+    }
     if (opts.apply && opts.check) {
       console.error("em upgrade: --apply and --check are mutually exclusive");
       process.exit(1);
@@ -3762,13 +3797,15 @@ program
       packagedAgentsRoot: packagedAgentsRoot(),
       model,
       refs,
+      ...(opts.foldContinuations ? { foldContinuations: true } : {}),
+      ...(opts.toSugar ? { toSugar: true } : {}),
     };
 
     if (opts.check) {
       const { ok, report, reasons } = checkUpgrade(ctx);
       console.error(`em upgrade --check: from ${report.from.version}${report.from.inferred ? ` (inferred: ${report.from.basis})` : ""} → to ${report.to}`);
       for (const s of report.steps) {
-        console.error(`  [${s.applicable ? "x" : " "}] ${s.id} (since ${s.sinceVersion}): ${s.reason}`);
+        console.error(`  [${s.optIn ? "~" : s.applicable ? "x" : " "}] ${s.id} (since ${s.sinceVersion}): ${s.reason}`);
       }
       for (const h of report.human) console.error(`  human: ${h.id}: ${h.reason}`);
       // MIL-257: the final line always says why (previously visible only via --json).
@@ -3780,8 +3817,11 @@ program
     if (opts.apply) {
       const result = applyUpgrade(ctx);
       for (const s of result.applied) {
-        if (s.applied) console.log(`applied: ${s.id} — ${s.changedFiles.join(", ")} (${s.commit})`);
-        else console.log(`skipped: ${s.id}`);
+        if (s.applied) {
+          console.log(`applied: ${s.id} — ${s.changedFiles.join(", ")} (${s.commit})`);
+          for (const n of s.notes ?? []) console.log(`  note: ${n}`);
+        }
+        else console.log(`skipped: ${s.id}${result.report.steps.find((x) => x.id === s.id)?.optIn ? " (opt-in: not requested by a flag)" : ""}`);
       }
       if (!result.ok) {
         console.error(result.message);
@@ -3790,6 +3830,7 @@ program
       if (result.emVersionCommit) console.log(`recorded: ${result.emVersionCommit}`);
       else console.log("Em version: already up to date — no commit needed");
       for (const h of result.report.human) console.log(`human: ${h.id}: ${h.reason}`);
+      printUpgradeShapeSection(file);
       return;
     }
 
@@ -3802,14 +3843,32 @@ program
     if (report.stateFileError) console.log(`state file: ${report.stateFileError}`);
     console.log("Steps:");
     for (const s of report.steps) {
-      console.log(`  [${s.applicable ? "x" : " "}] ${s.id} (since ${s.sinceVersion}): ${s.reason}`);
+      console.log(`  [${s.optIn ? "~" : s.applicable ? "x" : " "}] ${s.id} (since ${s.sinceVersion}): ${s.reason}`);
     }
     console.log("Human:");
     if (report.human.length === 0) console.log("  (none)");
     for (const h of report.human) console.log(`  ${h.id}: ${h.reason}`);
-    const applicableCount = report.steps.filter((s) => s.applicable).length;
-    console.log(`${applicableCount} step(s) applicable, ${report.human.length} human item(s) — re-run with --apply to apply mechanical steps`);
+    const applicableCount = report.steps.filter((s) => s.applicable && !s.optIn).length;
+    const optInCount = report.steps.filter((s) => s.optIn).length;
+    console.log(`${applicableCount} step(s) applicable${optInCount > 0 ? ` (+${optInCount} opt-in, marked [~], not applied by --apply)` : ""}, ${report.human.length} human item(s) — re-run with --apply to apply mechanical steps`);
+    printUpgradeShapeSection(file);
   });
+
+/** GH #290: the closing section of `em upgrade`'s text report — `em validate --shape` over the model as it
+ *  stands, so an estate sees how many advisory shape findings it carries. Never writes a waive file:
+ *  baselining shapes you accept is a decision (`--waive-file`, and a `shape-accepted:` Decisions-log bullet). */
+function printUpgradeShapeSection(file: string): void {
+  const { model, diagnostics, refs, source } = compileFile(file);
+  const all = computeAllDiagnostics(file, model, refs, diagnostics, source);
+  const report = buildShapeReport(all, []);
+  console.log("");
+  console.log("Shape (em validate --shape, advisory):");
+  console.log(formatShapeText(report, all.filter((d) => d.severity === "error").length));
+  console.log(
+    "Record each shape you accept as `shape-accepted: <rule> <refs> — <reason>` in `.event-modeling.md` `## Decisions log`; " +
+      "to baseline an estate, run `em validate " + file + " --shape --waive-file <path>` (em upgrade writes no waive file).",
+  );
+}
 
 // Exported so dev tooling (e.g. scripts/generate-skill-docs.ts) can introspect the registered
 // commands/options without triggering a real CLI run. Guarded the same way Node's CJS

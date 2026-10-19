@@ -8,7 +8,7 @@
 // repository, because `em slice ratify` records the HEAD it signs.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,7 @@ import { countDeferredBeyond, ratifiedBody, ratifiedHashScope, sliceDocBodyHash,
 import { parseQueuedBullet, queuedBullet, queuedItems } from "../src/catalog/deferQueue.js";
 import { drainQueueInState, finishSignedDocEdit, injectQueuedQuestions, isSignedDoc } from "../src/cli/defer.js";
 import { replaceFieldValue } from "../src/cli/frontmatterSurgery.js";
+import { writeModel117 } from "./helpers/model117.js";
 
 vi.setConfig({ testTimeout: 20_000 });
 
@@ -363,5 +364,142 @@ describe("lifecycle walk: ratify → defer → ready → revise / mark-implement
     const d = defer("--until", "v3");
     expect(d.stdout).toBe("deferred: slices/pay.md (retry policy → v3)\n");
     expect(read(docPath())).toContain("- [x] retry policy? — v2: fail fast (no retries); deferred to v3");
+  });
+});
+
+describe("lifecycle walk: a 1.17.0 model upgraded to 1.18.0 (GH #290, CLI, real git)", { timeout: 120_000 }, () => {
+  let dir: string;
+  const exportShape = () => {
+    const doc = JSON.parse(em(["export", "orders.em"], dir).stdout);
+    const slices = doc.model.slices as Array<{ key: string; continuationOf: string | null; alsoReads: unknown }>;
+    return { count: slices.length, shape: slices.map((s) => ({ key: s.key, continuationOf: s.continuationOf, alsoReads: s.alsoReads })) };
+  };
+  const upgradeCommits = () => git(dir, "log", "--format=%s").split("\n").filter((l) => l.startsWith("em upgrade:"));
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "em-gh290-e2e-"));
+    writeModel117(dir, { stage2: true });
+    git(dir, "init", "-q", "-b", "main");
+    git(dir, "config", "user.name", "em test"); // CI runners have no global identity; `em upgrade --apply` commits
+    git(dir, "config", "user.email", "em-test@example.com");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "1.17 model");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("em upgrade --apply takes every step, one commit each, and the model validates clean with the same read-model facts", () => {
+    const before = exportShape();
+    expect(before.count).toBe(12);
+    const facts = (e: ReturnType<typeof exportShape>) => ({
+      // the events each read model also reads (the instance's slice, `atSlice`, is what a rewrite may move)
+      alsoReads: e.shape.filter((s) => JSON.stringify(s.alsoReads) !== "[]").map((s) => [s.key, [...new Set((s.alsoReads as Array<{ event: string }>).map((r) => r.event))].sort()]), // the set of events: two stacked instances of one event list it once
+    });
+    const contOf = (e: ReturnType<typeof exportShape>) => Object.fromEntries(e.shape.map((s) => [s.key, s.continuationOf]));
+    expect(before.shape.filter((s) => s.continuationOf !== null).map((s) => s.key).sort()).toEqual(["orders-after-ship", "orders-manual", "shipments-after-ship", "shipments-after-ship-again"]);
+    const DEFAULT = ["collapse-alternative-events", "view-doc-sources-stale", "slice-index-stale", "parking-lot-fragments"];
+    const dry = em(["upgrade", "orders.em"], dir);
+    for (const id of DEFAULT) expect(dry.stdout).toContain(`[x] ${id}`);
+    expect(dry.stdout).toContain("[~] fold-continuations"); // an opt-in proposal is marked [~] ...
+    expect(dry.stdout).toMatch(/\n\d+ step\(s\) applicable \(\+1 opt-in, marked \[~\], not applied by --apply\)/); // ... and not counted as applicable
+    expect(Number(/\n(\d+) step\(s\) applicable/.exec(dry.stdout)![1])).toBe((dry.stdout.match(/^ {2}\[x\] /gm) ?? []).length);
+    expect(dry.stdout).toContain("OPT-IN");
+    expect(dry.stdout).toContain("fold-continuations-opt-in");
+
+    // Plain --apply: every default step, one commit each; fold-continuations is NOT applied.
+    const applied = em(["upgrade", "orders.em", "--apply"], dir);
+    expect(applied.status, applied.stderr).toBe(0);
+    for (const id of DEFAULT) expect(upgradeCommits().filter((l) => l.startsWith(`em upgrade: ${id}`))).toHaveLength(1);
+    expect(upgradeCommits().some((l) => l.startsWith("em upgrade: fold-continuations"))).toBe(false);
+    expect(applied.stdout).toContain("skipped: fold-continuations (opt-in: not requested by a flag)");
+    expect(applied.stdout).toContain("Shape (em validate --shape, advisory):");
+    expect(applied.stdout).toContain("shape-accepted:");
+    expect(applied.stdout).toContain("note: archive/slices/cancel-order-timeout.md holds Open Questions");
+    expect(existsSync(join(dir, "shape.waive"))).toBe(false);
+    const v = em(["validate", "orders.em"], dir);
+    expect(v.status, v.stdout + v.stderr).toBe(0);
+    const mid = exportShape();
+    expect(mid.count).toBe(before.count - 1); // the two cancel columns became one slice
+    expect(facts(mid)).toEqual(facts(before));
+    expect(contOf(mid)["shipments-after-ship"]).toBe("shipments");
+    // lineage: the kept doc names the retired one, the retired one names it back and is archived
+    const kept = JSON.parse(em(["export", "orders.em", "--slice", "cancel-order-customer"], dir).stdout).slice.doc;
+    expect(kept.mergedFrom.map((m: { raw: string }) => m.raw)).toEqual(["cancel-order-timeout@v1"]);
+    expect(readFileSync(join(dir, "archive", "slices", "cancel-order-timeout.md"), "utf8")).toContain("superseded-by: cancel-order-customer@v1");
+    expect(readFileSync(join(dir, "orders.em"), "utf8")).toContain("event Order Cancelled By Customer | Order Cancelled By Timeout @Sales");
+    expect(readFileSync(join(dir, "slices", "orders.md"), "utf8")).toContain('"Order Placed Manually" (via "Orders manual")');
+    expect(readFileSync(join(dir, ".event-modeling.md"), "utf8")).toContain("- Retry policy (from slice place-order, deferred to v2)");
+    expect(em(["slice", "sync", "orders.em", "--check"], dir).status).toBe(0);
+    expect(em(["slice", "index", "orders.em", "--check"], dir).status).toBe(0);
+
+    // Opt-in: --fold-continuations stacks the same-view continuations; per-slice continuationOf and the kept index row are unchanged.
+    const folded = em(["upgrade", "orders.em", "--apply", "--fold-continuations"], dir);
+    expect(folded.status, folded.stderr).toBe(0);
+    expect(upgradeCommits().filter((l) => l.startsWith("em upgrade: fold-continuations"))).toHaveLength(1);
+    expect(em(["validate", "orders.em"], dir).status).toBe(0);
+    const after = exportShape();
+    expect(after.count).toBe(mid.count - 1);
+    expect(facts(after)).toEqual(facts(mid));
+    const keptKeys = Object.keys(contOf(after));
+    expect(keptKeys).not.toContain("shipments-after-ship-again");
+    for (const key of keptKeys) expect(contOf(after)[key]).toBe(contOf(mid)[key]); // every surviving slice keeps its continuationOf
+    expect(contOf(after)["orders-after-ship"]).toBe("orders");
+    expect(readFileSync(join(dir, "README.md"), "utf8")).toContain("Shipments after ship");
+    expect(readFileSync(join(dir, "README.md"), "utf8")).not.toContain("Shipments after ship, again");
+    expect(em(["slice", "sync", "orders.em", "--check"], dir).status).toBe(0);
+    expect(em(["slice", "index", "orders.em", "--check"], dir).status).toBe(0);
+
+    const commits = upgradeCommits().length;
+    expect(em(["upgrade", "orders.em", "--apply", "--fold-continuations"], dir).status).toBe(0);
+    expect(upgradeCommits()).toHaveLength(commits);
+  });
+
+  it("em upgrade --to-sugar without --apply is a dry run: it lists the fold (or the refusal) and writes nothing", () => {
+    const refused = em(["upgrade", "orders.em", "--to-sugar"], dir);
+    expect(refused.status, refused.stderr).toBe(0);
+    expect(refused.stdout).toContain("continuations of several views — fold by hand or keep the stacked slice");
+    const model = readFileSync(join(dir, "orders.em"), "utf8").replace(/slice "Orders after ship" \{[\s\S]*?\n\}\n?/, "");
+    writeFileSync(join(dir, "orders.em"), model);
+    git(dir, "add", "orders.em");
+    git(dir, "commit", "-q", "-m", "drop the other-view continuation");
+    const dry = em(["upgrade", "orders.em", "--to-sugar"], dir);
+    expect(dry.status, dry.stderr).toBe(0);
+    expect(dry.stdout).toContain("[x] fold-continuations");
+    expect(dry.stdout).toContain("CHANGES continuationOf and the doc join to the host (ship-order--again)");
+    expect(dry.stdout).toContain("removes the index rows of shipments-after-ship, shipments-after-ship-again");
+    expect(git(dir, "status", "--porcelain")).toBe("");
+    expect(em(["upgrade", "orders.em", "--check", "--to-sugar"], dir).status).toBe(1);
+  });
+
+  it("a ratified doc with a stale view region is left byte-for-byte alone and its hash still verifies after --apply", () => {
+    const docPath = join(dir, "slices", "orders.md");
+    const plain = readFileSync(docPath, "utf8");
+    const withHash = (h: string) => plain.replace("status: draft", `status: ready-to-implement\nratifiedBy: Alex\nratifiedOn: 2026-10-02\nratifiedHash: ${h}`);
+    writeFileSync(docPath, withHash(sliceDocBodyHash(plain)));
+    git(dir, "add", "slices/orders.md");
+    git(dir, "commit", "-q", "-m", "ratify orders");
+    const signedBytes = readFileSync(docPath, "utf8");
+    expect(em(["validate", "orders.em", "--check-signed-bodies"], dir).status).toBe(0);
+
+    const dry = em(["upgrade", "orders.em"], dir);
+    expect(dry.stdout).toContain("[ ] view-doc-sources-stale");
+    expect(dry.stdout).toContain("slice-doc-stale-signed");
+    const applied = em(["upgrade", "orders.em", "--apply"], dir);
+    expect(applied.status, applied.stderr).toBe(0);
+    expect(upgradeCommits().some((l) => l.startsWith("em upgrade: view-doc-sources-stale"))).toBe(false);
+    expect(readFileSync(docPath, "utf8")).toBe(signedBytes);
+    const hash = /ratifiedHash: (\S+)/.exec(signedBytes)![1];
+    expect(ratifiedHashScope(signedBytes, hash)).toBe("current");
+    expect(em(["validate", "orders.em", "--check-signed-bodies"], dir).status).toBe(0);
+    expect(em(["validate", "orders.em", "--slice-ready", "orders"], dir).stdout).not.toContain("slice-ready-ratified-hash-mismatch");
+  });
+
+  it("em storyline suggest prints a patch that git apply accepts and never writes the model", () => {
+    const r = em(["storyline", "suggest", "orders.em"], dir);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('+storyline "Place" source "docs/orders.md#place" {');
+    expect(git(dir, "status", "--porcelain")).toBe("");
+    writeFileSync(join(dir, "s.patch"), r.stdout);
+    git(dir, "apply", "s.patch");
+    expect(readFileSync(join(dir, "orders.em"), "utf8")).toContain('storyline "Place"');
+    expect(em(["validate", "orders.em"], dir).status).toBe(0);
   });
 });

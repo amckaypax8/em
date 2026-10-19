@@ -272,10 +272,13 @@ em ci init <model>                                                  # install .g
 em ci init <model> --tests <dir>                                    # test directory the coverage/status steps scan for INV-* citations
 em ci init <model> -f, --force                                      # replace an existing workflow file that has no GENERATED markers, or a managed block generated for a different set of models
 em ci init <model> --check                                          # verify both files match the current preset; exit non-zero on drift without writing (CI)
+em storyline suggest <file>                                         # advisory (GH #290): propose `storyline` blocks for a model that has none — one per distinct slice `source "url"`, the remaining slices grouped by the view-instance chains (`again`) they feed — printed as a unified diff on stdout (apply with `patch -p1` or `git apply`); never writes the model
 em upgrade <file>                                                   # bring a model repo authored under an older em (1.6 forward) up to the installed version: an ordered list of mechanical steps (skill bundle, reaction shape, state-file bullets, generated CI blocks, constitution scaffold) plus a human list of things no command can safely decide by itself (MIL-219, see docs/upgrading.md). Dry-run by default; --apply makes one git commit per applicable step, refusing on a dirty working tree
 em upgrade <file> --apply                                           # apply every applicable mechanical step, one git commit each, then a final `Em version:` commit
 em upgrade <file> --check                                           # exit non-zero only on a hard incompatibility (an existing but unparseable state file, an un-migratable .em shape) — writes nothing; what CI runs; the final line says why
 em upgrade <file> --json                                            # print a JSON document instead of text (dry-run/--check only, never with --apply)
+em upgrade <file> --fold-continuations                              # also run the opt-in fold-continuations step (stack consecutive continuations of one view into the first; continuationOf, doc join and index rows unchanged)
+em upgrade <file> --to-sugar                                        # (implies --fold-continuations; without --apply it is a dry run listing exactly what would fold): fold continuations into their host command slice as `view X again … shown on` lines — CHANGES continuationOf and the doc join to `<host>--again` and removes the folded slices' index rows
 ```
 <!-- GENERATED:cli:end -->
 
