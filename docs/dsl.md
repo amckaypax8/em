@@ -428,6 +428,39 @@ field of a declared type) — see [cli.md](cli.md). This is the actual payoff: a
 declared with `derived` shows up in `em export`'s model again, instead of living only in a
 slice doc's prose where nothing machine-readable knows it exists.
 
+### Collection fields fed by child events
+
+A view field typed `Type[]` (a declared [`type`](#named-types)) with a traced `derived from`
+embeds a child entity in the view. Use it when the screen's question needs the child's data and
+the child's events (`AttributeValueCreated`, `AttributeValueDeleted`) are on the parent's context:
+
+```
+type AttributeValue {
+  valueId: UUID
+  value: String
+}
+
+view Attributes from "Attribute Created", "Attribute Value Created", "Attribute Value Deleted" {
+  attributeId: UUID
+  values: AttributeValue[] derived from "Attribute Value Created", "Attribute Value Deleted"
+}
+```
+
+- The field is exempt from `view-field-no-source` (it is `derived`), but each field of the
+  element type must trace to a field on at least one named event; one that does not gets
+  `fields-completeness/view-field-no-source` naming the collection field and the element field.
+  Skipped while a named event declares no `{ fields }`.
+- Named events must be among the view's sources (`derived-from-unresolved`), as for any traced
+  `derived`.
+- There is no add/remove/key clause: projection behaviour is not model structure. `em slice sync`
+  writes a ``Collection of `T`, fed by …`` note under the field and one `### Scenario:` stub (Given/When/Then, in the `parseScenarios` grammar)
+  per named event below the table; a view scenario's When is the query, in the generated (read-only) view region. Order of the named
+  events is not significant. The verb is pre-filled from the event name's last word (Created/
+  Added/Attached: `contains`; Deleted/Removed/Detached: `omits`; Updated/Renamed/Changed:
+  `updates`), otherwise left as `{{ contains / omits / updates }}`. Copy the stubs into
+  `## Scenarios` and complete them there; the region is rewritten on every sync. `em export`
+  marks the field `collection: true` (schema `1.19`).
+
 ## Named types
 
 A top-level `type Name { field: Type, ... }` declaration names a reusable structured shape —
