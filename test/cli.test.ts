@@ -738,7 +738,7 @@ describe("em validate --slice-ready (CLI, MIL-87)", () => {
     const r = em(["validate", "ready.em", "--slice-ready", "ready-slice", "--json"], readyDir);
     expect(r.status).toBe(0);
     const doc = JSON.parse(r.stdout);
-    expect(doc.validateSliceReadySchemaVersion).toBe("1.3");
+    expect(doc.validateSliceReadySchemaVersion).toBe("1.4");
     expect(doc.sliceKey).toBe("ready-slice");
     expect(doc.gates).toEqual({
       docBound: true,
@@ -5673,5 +5673,34 @@ describe("API-first gate (CLI, MIL-238)", () => {
     const ok = em(["slice", "ratify", "shop.em", "place-order", "--by", "Alex Rivera", "--on", "2026-10-08", "--contract-change", "orderId is now the public order number"], dir);
     expect(ok.status).toBe(0);
     expect(readFileSync(join(dir, "slices", "place-order.md"), "utf8")).toContain('contractChange: "orderId is now the public order number"');
+  });
+});
+
+// GH #293: scenario-quality lints are advisory; `em validate --strict` promotes them to errors.
+describe("em validate --strict (GH #293)", () => {
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "em-cli-strict-"));
+    mkdirSync(join(dir, "slices"), { recursive: true });
+    writeFileSync(
+      join(dir, "slices", "ready-slice.md"),
+      "---\nschemaVersion: 1\npattern: state-change\nswimlane: order\nstatus: ready-to-implement\nversion: 1\nratifiedBy: Alex Rivera\n---\n## Scenarios (Given / When / Then)\n### Scenario: vague\n- **Given:**\n  - a thing\n- **When:**\n  - somebody pokes it\n- **Then:**\n  - Thing Done is recorded\n",
+    );
+    writeFileSync(
+      join(dir, "m.em"),
+      `slice "Ready Slice" {\n  ui Screen @Customer\n  command Do Thing note "slices/ready-slice.md"\n  event Thing Done\n}\nslice "Read Model" {\n  view Thing List from "Thing Done"\n  ui List Screen @Customer\n}\n`,
+    );
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("exits 0 without --strict (warning, still ready), 1 with --strict", () => {
+    const plain = em(["validate", "m.em"], dir);
+    expect(plain.status).toBe(0);
+    expect(plain.stderr).toContain("When does not name the slice's command");
+    expect(em(["validate", "m.em", "--slice-ready", "ready-slice"], dir).status).toBe(0);
+    expect(em(["validate", "m.em", "--strict"], dir).status).toBe(1);
+    const strictReady = em(["validate", "m.em", "--slice-ready", "ready-slice", "--strict"], dir);
+    expect(strictReady.status).toBe(1);
+    expect(strictReady.stdout).toContain("NOT ready-to-implement");
   });
 });
