@@ -74,6 +74,41 @@ see. A State Change slice is only finished once both hold, which in practice mea
 with the State View slice that consumes its event — and that State View needs its own consumer
 in turn. [`em validate` warns](validation.md#both-ends-of-a-flow) on any of those gaps.
 
+### One command, several outcomes: one slice
+
+When a command can end in more than one outcome, the outcomes are **events of the same slice**,
+not sibling slices per branch. Dilger's framing: a single business action has "two different
+possible outcomes" — `PaymentIssued` or `PaymentFailed` — and both belong to the one command
+that decided between them. The rejection rules, and the scenarios that show the command both
+succeeding and not succeeding, are invariants and Given/When/Then scenarios in that slice's doc
+(Dymitruk: "a few of these stories to show how a command can and cannot succeed" — write them as
+scenarios first). If the failure then has its own continuation, Dilger's "Linearize it!" applies:
+it becomes a *later* chapter linked to the originating event, never a parallel branch of the
+same story.
+
+```em
+slice "Issue Payment" {
+  ui Payout Screen @Finance
+  command Issue Payment
+  event Payment Issued | Payment Failed @Payment
+}
+
+slice "Payment Outcomes" {
+  view Payment Outcomes from "Payment Issued", "Payment Failed"
+  ui Payout History @Finance
+}
+```
+
+The outcomes are written as alternatives (`event A | B @Ctx`) and share **one** context and one cell
+in its lane: one command records exactly one of them. This is not the Law 1 fan from
+[timeline.md](timeline.md), which is an atomic set of facts all recorded together on different
+contexts. When the alternatives differ in fields or clauses, use the block form
+(`oneof { event A @Ctx { ... } event B @Ctx { ... } }`); when an alternative is also recorded by
+another command elsewhere, write it bare so it inherits the first declaration (see
+[dsl.md](dsl.md#alternative-events--event-a--b-context)). Splitting this into an "Issue Payment" slice and a
+"Payment Failed" slice is the anti-pattern; 1.18.0 adds the lint `automation-split-by-outcome`,
+which flags the Automation form of it. See also [storyline.md](storyline.md).
+
 ## State View
 
 Past events are projected into a read model that a screen displays. Read-only; nothing
@@ -142,6 +177,59 @@ instead. A `ui` left in the reaction's slice renders disconnected, with no edge,
 
 The third slice is the State View that reads `Payment Captured` — here it's the same to-do
 list, one payment shorter. Without it the event is unread and `em validate` warns.
+
+### Outcomes of one reaction: one slice
+
+A reaction that can succeed, fail, or schedule a retry is still **one** business reaction, so it
+is one Automation slice. `Fulfilment Succeeded`, `Fulfilment Failed` and `Fulfilment Retry
+Scheduled` are the *outcome events* of that slice's command (Dilger: "one business action… two
+different possible outcomes"). The retry policy (how many attempts, what backoff) and the
+failure handling (what happens at the limit) are **invariants and scenarios in that slice's
+doc**, not new slices. Splitting the processor into a happy-path slice, a failure slice and a
+retry slice along control flow is the anti-pattern — 1.18.0 adds the lint
+`automation-split-by-outcome`, which flags it.
+
+```em
+slice "Pay Order" {
+  ui Checkout @Customer
+  command Pay Order
+  event Order Paid @Order
+}
+
+slice "Orders To Fulfil" {
+  view Orders To Fulfil from "Order Paid"
+}
+
+slice "Fulfil Order" {
+  processor Fulfilment Worker from "Orders To Fulfil"
+  command Fulfil Order
+  event Fulfilment Succeeded | Fulfilment Failed | Fulfilment Retry Scheduled @Fulfilment
+}
+
+slice "Orders To Fulfil — retry" {
+  view Orders To Fulfil again from "Fulfilment Retry Scheduled"
+  ui Retry Queue @Ops
+}
+
+slice "Fulfilment Status" {
+  view Fulfilment Status from "Fulfilment Succeeded", "Fulfilment Failed", "Fulfilment Retry Scheduled"
+  ui Fulfilment Board @Ops
+}
+```
+
+The retry fires because the processor's to-do list reads the retry-scheduled event: the view
+reappears with `view Orders To Fulfil again from "Fulfilment Retry Scheduled"`, so the **same**
+reaction picks the order up again. Add a new slice only when a **different actor or a different
+trigger** is involved: a human override of a failed fulfilment, or a scheduled timer that is
+itself modelled as a reaction on a different view, has its own trigger and so its own slice
+(a slice that only retries another command is flagged by the lint `retry-slice-of`, 1.18.0).
+
+The outcomes are alternatives on one context (`event A | B @Ctx`, see [dsl.md](dsl.md)): one run of
+the command records exactly one of them, which is why a Law 1 fan across invented contexts is the
+wrong picture. A failure that continues the story is "Linearized"
+(Dilger) as a later chapter linked to the originating event, never a branch; that later chapter
+reads the failure event through a view or a reaction, since Law 1 forbids event-to-event arrows. See
+[storyline.md](storyline.md).
 
 ## Translation
 
