@@ -268,6 +268,17 @@ never a substitute for the record. The skill refuses to move to the slice phase 
 A rule joins the family by registering `family: "shape"`; today that is `timeline-entity-clustered` and
 `slice-outside-storyline`.
 
+`command-second-intent` (GH #286) is an advisory lint for a command carrying a second intent:
+it fires when a command has at least 2 invariants (model-declared, or from its bound slice doc
+when the slice has one command) whose rule text opens with a conditional on the same field,
+`If|When|Only if|Unless <field> is|are set|present|provided|non-null|not null|given|supplied`
+(field bare or backticked, grouped case-insensitively; the tail is required for every opener, so
+plain guards like "Unless quantity is positive" never fire). It fires once per command and field;
+`refs` is the command ref followed by each invariant ID. The pattern list is a constant, like the
+other shape lints. Fix: split the conditional rule set into its own command. Both commands may
+record the same event: a bare repeat of the event inherits the first declaration's fields and is legal
+(`shared-event-field-mismatch` is the only error, for a repeat whose fields differ). It carries the `shape` family.
+
 ### Translation naming
 
 A `translation` reading from two different producers under the same name is a different kind
