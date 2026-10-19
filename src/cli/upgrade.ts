@@ -24,6 +24,7 @@
 
 import { existsSync, readFileSync, realpathSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { findRosterAbove, GRANDFATHERED_RATIFIER } from "../roster/roster.js";
 import { NormalizedModel, PUBLIC_SCALAR_TYPE_NAMES } from "../model/model.js";
 import { findUnresolvedPublicFieldTypes } from "../model/validate.js";
 import { RefsResult } from "../model/refs.js";
@@ -346,7 +347,10 @@ function ciBlockFiles(args: CiInitArgs, ctx: UpgradeContext): { ci: [string, str
     };
   }
   return {
-    ci: [buildCiWorkflowFile(args.model, args.testsDir, ctx.installedVersion), ciManagedBody(args.model, args.testsDir, ctx.installedVersion)],
+    ci: [
+      buildCiWorkflowFile(args.model, args.testsDir, ctx.installedVersion, findRosterAbove(dirname(resolve(ctx.repoRoot, args.model))) !== null),
+      ciManagedBody(args.model, args.testsDir, ctx.installedVersion, findRosterAbove(dirname(resolve(ctx.repoRoot, args.model))) !== null),
+    ],
     conform: [buildConformWorkflowFile(args.model, ctx.installedVersion, usePlugin), conformManagedBody(args.model, ctx.installedVersion, usePlugin)],
   };
 }
@@ -433,7 +437,7 @@ function applyConstitution(ctx: UpgradeContext): StepApplyOutcome {
 // `ready-to-implement-no-ratifiedby` human item) with no `ratifiedBy`. A doc with no `version:`
 // at all is treated as version 1 (the schema's default). ----
 
-export const GRANDFATHERED_RATIFIER = "grandfathered (unsigned before em 1.14)";
+export { GRANDFATHERED_RATIFIER };
 
 /** Pure text transform: inserts the grandfather sign-off after the `status:` line, using only
  *  the key lines that are missing (a stray `ratifiedOn:` is kept as-is), in the file's own EOL.

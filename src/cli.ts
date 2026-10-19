@@ -37,6 +37,11 @@ import { validateOrphanedSliceDocs } from "./catalog/orphanedSliceDocValidate.js
 import { validateModelVersionStale } from "./catalog/modelVersionValidate.js";
 import { validateInvariants } from "./catalog/invariantsValidate.js";
 import { computeSliceReadiness } from "./catalog/sliceReadyValidate.js";
+import { checkRosterForWrite, findRosterAbove, loadRoster, ROSTER_FILE } from "./roster/roster.js";
+import { observeSigners, renderRoster } from "./roster/init.js";
+import { rosterContextFor } from "./roster/context.js";
+import { computeModelKey } from "./model/qualifiedRef.js";
+import { checkRoster, formatRosterCheck, buildRosterCheckJson, grandfatheredNotice } from "./roster/check.js";
 import {
   EngagementModelInput,
   Selector,
@@ -989,7 +994,8 @@ slice
   .argument("<slice-key>", "slice export key (kebab-case)")
   .requiredOption("--by <name>", "the reviewer's (or facilitator's) name")
   .option("--on <date>", "review date, YYYY-MM-DD (default: today, local date)")
-  .action((file: string, sliceKey: string, opts: { by: string; on?: string }) => {
+  .option("--roster <path>", "ratifier roster to check --by against (GH #259; default: the nearest ratifiers.yaml above the model, none = unrestricted)")
+  .action((file: string, sliceKey: string, opts: { by: string; on?: string; roster?: string }) => {
     const { model, refs, diagnostics } = compileFile(file);
     printDiagnostics(diagnostics);
     sliceKey = resolveSliceOrExit("em slice review", model, refs, sliceKey);
@@ -1001,6 +1007,12 @@ slice
     );
     if (scopedErrors.length > 0) {
       console.error(`em slice review: slice "${sliceKey}" has errors — fix them first`);
+      process.exit(1);
+    }
+
+    const rosterRefused = checkRosterForWrite(loadRoster(dirname(file), opts.roster, rosterContextFor(model, file)), "reviewers", opts.by, model, refs.sliceKeys.indexOf(sliceKey), computeModelKey(model, file));
+    if (rosterRefused !== null) {
+      console.error(`em slice review: ${rosterRefused}`);
       process.exit(1);
     }
 
@@ -1056,6 +1068,7 @@ slice
       "points at a commit a squash or rebase merge would orphan; the uncommitted-changes check does not apply",
   )
   .option("--on <date>", "ratification date, YYYY-MM-DD (default: today, local date)")
+  .option("--roster <path>", "ratifier roster to check --by against (GH #259; default: the nearest ratifiers.yaml above the model, none = unrestricted)")
   .option(
     "--skip-review",
     "ratify without a recorded review — prints a loud notice on stderr and records `reviewSkipped: <status>` on the doc " +
@@ -1075,7 +1088,7 @@ slice
     (
       file: string,
       sliceKey: string,
-      opts: { by: string; on?: string; skipReview?: boolean; meaningUnchanged?: boolean; contractChange?: string; ref?: boolean },
+      opts: { by: string; on?: string; skipReview?: boolean; meaningUnchanged?: boolean; contractChange?: string; ref?: boolean; roster?: string },
     ) => {
       // commander: `--no-ref` sets `opts.ref === false`; unset leaves it undefined (ref recorded).
       const noRef = opts.ref === false;
@@ -1095,6 +1108,12 @@ slice
       );
       if (scopedErrors.length > 0) {
         console.error(`em slice ratify: slice "${sliceKey}" has errors — fix them first`);
+        process.exit(1);
+      }
+
+      const rosterRefused = checkRosterForWrite(loadRoster(dirname(file), opts.roster, rosterContextFor(model, file)), "ratifiers", opts.by, model, refs.sliceKeys.indexOf(sliceKey), computeModelKey(model, file));
+      if (rosterRefused !== null) {
+        console.error(`em slice ratify: ${rosterRefused}`);
         process.exit(1);
       }
 
@@ -2062,6 +2081,12 @@ program
     "promote advisory lints (GH #293: scenario-quality warnings) to errors: they fail the run and, with --slice-ready, block readiness",
   )
   .option(
+    "--roster <path>",
+    "with --slice-ready (GH #259): the ratifier roster to check `ratifiedBy` against (default: the nearest " +
+      "ratifiers.yaml above the model; none = unrestricted). A name the roster does not permit for the slice's " +
+      "context is `ratified-by-not-in-roster` (error)",
+  )
+  .option(
     "--check-signed-bodies",
     "opt-in (GH #257): compare every slice doc that records a `ratifiedHash:` — ready, implemented, any status — " +
       "to its body; a mismatch is `slice-body-changed-since-ratification` (error). A pre-1.17 whole-body hash with an " +
@@ -2096,10 +2121,15 @@ program
         sliceReady?: string;
         requireRatifiedHash?: boolean;
         strict?: boolean;
+        roster?: string;
         checkSignedBodies?: boolean;
         json?: boolean;
       },
     ) => {
+      if (opts.roster !== undefined && !opts.sliceReady) {
+        console.error("em validate: --roster applies only with --slice-ready <key>");
+        process.exit(1);
+      }
       if (opts.requireRatifiedHash && !opts.sliceReady) {
         console.error("em validate: --require-ratified-hash applies only with --slice-ready <key>");
         process.exit(1);
@@ -2165,6 +2195,7 @@ program
         const { scoped, advisories, ready, result } = computeSliceReadiness(model, refs, dirname(file), key, contractInput, allDiagnostics, {
           requireRatifiedHash: opts.requireRatifiedHash === true,
           strict: opts.strict === true,
+          rosterPath: opts.roster,
         });
         printDiagnostics([...scoped, ...advisories]);
         if (opts.json) {
@@ -2604,7 +2635,7 @@ program
 
       // MIL-239 (R11): the nearest system.yaml above the first input file, consumer-adaptation counted.
       const system = statusSystemBlock(files[0], realGit, (m) => console.error(`warn: em status: ${m}`));
-      const report = buildStatusReport(files, sliceFacts, openIssuesCount, invariants, conformance, statusDiagnostics, modelVersion, emVersion, system, readOpenEngagements(files));
+      const report = buildStatusReport(files, sliceFacts, openIssuesCount, invariants, conformance, statusDiagnostics, modelVersion, emVersion, system, readOpenEngagements(files), loadRoster(dirname(files[0])).state);
 
       let output: string;
       if (opts.json) output = buildStatusJson(report);
@@ -3055,6 +3086,71 @@ engagement
     }
     writeFileSync(loaded.path, result.text);
     console.log(`closed engagement "${slug}" (${loaded.path})`);
+  });
+
+const rosterCommand = program
+  .command("roster")
+  .description("the optional ratifier roster (ratifiers.yaml, GH #259) -- who may sign slice docs");
+
+rosterCommand
+  .command("init")
+  .description(
+    "write ratifiers.yaml beside the model, seeded from the names already recorded in the slice docs' " +
+      "`ratifiedBy:`/`reviewedBy:` (whole-model entries; narrow them with `contexts:` by hand). Refuses " +
+      "to overwrite an existing file unless --force; `em upgrade`'s grandfathered placeholder is not a name",
+  )
+  .argument("<file>", "input .em file")
+  .option("--roster <path>", "write the roster here instead of <model dir>/ratifiers.yaml")
+  .option("--force", "overwrite an existing roster file")
+  .action((file: string, opts: { roster?: string; force?: boolean }) => {
+    const { model, refs, diagnostics } = compileFile(file);
+    printDiagnostics(diagnostics);
+    const target = opts.roster ?? join(dirname(file), ROSTER_FILE);
+    if (existsSync(target) && !opts.force) {
+      console.error(`em roster init: ${target} already exists -- pass --force to overwrite it`);
+      process.exit(1);
+    }
+    // A roster already governing this model from higher up would be shadowed by a nearer one.
+    const governing = findRosterAbove(dirname(file));
+    if (governing !== null && resolve(governing) !== resolve(target) && !opts.force) {
+      console.error(`em roster init: ${governing} already governs this model -- writing ${target} would shadow it; pass --force to write it anyway`);
+      process.exit(1);
+    }
+    const observed = observeSigners(model, refs, dirname(file));
+    if (observed.ratifiers.length === 0 && observed.reviewers.length === 0) {
+      const gfNone = grandfatheredNotice(observed.grandfathered);
+      if (gfNone) console.log(gfNone);
+      console.error("em roster init: no ratifiedBy/reviewedBy names found in the slice docs -- write ratifiers.yaml by hand (docs/slice-doc-schema.md#who-may-ratify)");
+      process.exit(1);
+    }
+    writeFileSync(target, renderRoster(observed), "utf8");
+    console.log(`wrote ${target} (${observed.ratifiers.length} ratifier(s), ${observed.reviewers.length} reviewer(s))`);
+    const gf = grandfatheredNotice(observed.grandfathered);
+    if (gf) console.log(gf);
+  });
+
+rosterCommand
+  .command("check")
+  .description(
+    "check EVERY slice doc's recorded signers against the ratifier roster (GH #259) - `ratifiedBy` on " +
+      "ready-to-implement and implemented docs, `reviewedBy` on any doc - the whole-model CI gate that " +
+      "`--slice-ready <key>` (one ready slice) is not. Exit 1 on any violation or an invalid roster; no " +
+      "roster file = nothing to check, exit 0. The `grandfathered ...` placeholder is exempt (counted)",
+  )
+  .argument("<file>", "input .em file")
+  .option("--roster <path>", "roster to check against (default: the nearest ratifiers.yaml above the model)")
+  .option("--json", "print a JSON document (per-doc results, diagnostics with refs); exit codes unchanged")
+  .action((file: string, opts: { roster?: string; json?: boolean }) => {
+    const { model, refs } = compileFile(file);
+    const loaded = loadRoster(dirname(file), opts.roster, rosterContextFor(model, file));
+    const report = checkRoster(model, refs, dirname(file), file, loaded);
+    printDiagnostics(report.diagnostics);
+    if (opts.json) {
+      process.stdout.write(buildRosterCheckJson(file, report) + "\n");
+    } else {
+      for (const line of formatRosterCheck(report)) console.log(line);
+    }
+    if (!report.ok) process.exitCode = 1;
   });
 
 const systemCommand = program
@@ -3539,8 +3635,8 @@ ci.command("init")
           ciPath,
           planCiFile(
             ciPath,
-            buildCiWorkflowFile(model, opts.tests, PKG_VERSION),
-            ciManagedBody(model, opts.tests, PKG_VERSION),
+            buildCiWorkflowFile(model, opts.tests, PKG_VERSION, findRosterAbove(dirname(resolve(model))) !== null),
+            ciManagedBody(model, opts.tests, PKG_VERSION, findRosterAbove(dirname(resolve(model))) !== null),
             CI_WORKFLOW_MARKER,
             !!opts.force,
           ),

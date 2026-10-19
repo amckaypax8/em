@@ -88,6 +88,68 @@ over an omission — it reports). `implementedIn` and the lineage keys are the g
 optional ones; `implementedIn`'s required-once-implemented rule in the table below is
 convention, not parser-enforced.
 
+## Who may ratify
+
+The schema records *who* signed (`reviewedBy`, `ratifiedBy`) but, by default, accepts any
+non-empty name: who is allowed to sign is the host repo's decision. A host that wants em to
+enforce it supplies an optional **roster**, `ratifiers.yaml`, beside the model. See
+[examples/order-fulfillment/ratifiers.yaml](https://github.com/milehimikey/em/blob/main/examples/order-fulfillment/ratifiers.yaml).
+
+```yaml
+rosterSchemaVersion: "1.0"
+ratifiers:
+  - name: Aaron McKay
+    contexts: [Product, Attribute]   # omit = the whole model
+  - name: Mike Key
+  - name: Dana Lee
+    models: [pim]                    # omit = every model the roster governs
+reviewers:                           # optional; same shape, checked by `em slice review --by`
+  - name: Mike Key
+```
+
+- **Schema.** `rosterSchemaVersion` is required (`"1.0"`); at least one of `ratifiers:` /
+  `reviewers:` is required; each is a non-empty list of `{ name, contexts?, models? }`. Unknown
+  keys are errors (`roster-invalid`). A missing `ratifiers:` / `reviewers:` key leaves that role
+  unrestricted.
+- **Placement.** The nearest `ratifiers.yaml` walking up from the model's directory, stopping at
+  the nearest directory holding `.git` (or the filesystem root). If no `.git` exists anywhere
+  above the model, only the model's own directory is searched. `--roster <path>` on `ratify`,
+  `review`, `validate --slice-ready`, `roster check` overrides discovery; a path that does not
+  exist is an error, never "no roster".
+- **A slice's contexts** are the contexts of its **events** plus the contexts of the events its
+  **views read** - each view instance's **own** `from`, never a union across the read model's
+  instances (adding a later `again` instance never changes an earlier slice's contexts). A
+  continuation slice also takes its originating instance's own `from`. A slice with neither has no
+  context and is permitted only by entries without `contexts`.
+  A continuation fed from a different context than its originating view (e.g. `tool-shows-on-loan` =
+  Loan + Tool) therefore needs a ratifier permitted for every one of those contexts, so a team with
+  one lead per context needs a joint or whole-model roster entry for such slices.
+- **An entry permits a slice** when it applies to the model and either has no `contexts` or lists
+  **every** context of the slice: a cross-context slice needs a ratifier who may sign for all of
+  them (a leading `@` is tolerated in `contexts`).
+- **Per-model scoping.** `models: [<modelKey>]` (the key `em export` reports as `model.key`) limits
+  an entry to those models; an entry without it applies to every model the roster governs. Context
+  names are matched **per model** against that model's declared contexts, so a shared root roster
+  needs `models:` whenever the models' ratifiers differ. A `models:` key the enclosing
+  `system.yaml` does not list is `roster-invalid`.
+- **Validation against the model.** A `contexts:` entry the model does not declare (case-sensitive)
+  is `roster-invalid`, naming the context; only entries that apply to the model are checked.
+- **File absent: today's behaviour**, no warning. **File present but invalid: fail closed** -
+  `ratify` and `review` refuse, `--slice-ready` and `roster check` report `roster-invalid`.
+- **`grandfathered (unsigned before em 1.14)`** is em's own migration marker (`em upgrade`'s
+  `ratified-signoff`), not a signer: exempt from the `--slice-ready` check and from `roster check`
+  (which counts it) until the slice is re-ratified - but only the **exact** string, and only on a
+  doc with no `ratifiedHash` (the state `em upgrade` leaves). `grandfathered by X`, or the marker on
+  a doc that carries a hash, is a signer and is checked.
+- **Where it is enforced.** At write time by `em slice ratify` / `em slice review` (the refusal
+  lists the permitted names); at check time by `em validate --slice-ready <key>`
+  (`ratified-by-not-in-roster`, error - one `ready-to-implement` slice, ratifier only) and by
+  `em roster check <model>` (every doc, `ratifiedBy` on `ready-to-implement` and `implemented`,
+  `reviewedBy` on any), the command `em ci init` wires into CI when a roster exists - see
+  [ci.md](ci.md#ratifier-roster-gate). `em status` reports `roster: present|absent|invalid`.
+- `em roster init <model>` seeds the file from the names already in the docs
+  ([cli.md](https://github.com/milehimikey/em/blob/main/docs/cli.md#em-roster-init-file)).
+
 ## Required vs optional, by `status`
 
 | Key | draft | reviewed | ready-to-implement | implemented |

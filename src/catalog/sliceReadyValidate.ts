@@ -35,6 +35,9 @@ import { readSliceDoc } from "./readSliceDoc.js";
 import { ratifiedHashScope } from "./sliceDoc.js";
 import { findStructuredSectionProblems } from "./sliceSections.js";
 import { ContractCheckInput, contractStatus, slicePublicTouching } from "./apiFirst.js";
+import { isGrandfatheredSignoff, loadRoster, rosterRefusal, sliceContexts } from "../roster/roster.js";
+import { rosterContextFor } from "../roster/context.js";
+import { computeModelKey } from "../model/qualifiedRef.js";
 
 export type { ContractCheckInput } from "./apiFirst.js";
 
@@ -88,6 +91,8 @@ export interface SliceReadyOptions {
   requireRatifiedHash?: boolean;
   /** `--strict` (GH #293): advisory-rule diagnostics (RuleDef.advisory) are promoted to errors and gate. */
   strict?: boolean;
+  /** GH #259: explicit roster path (`--roster`); omitted = the nearest `ratifiers.yaml` above the model. */
+  rosterPath?: string;
 }
 
 export function validateSliceReady(
@@ -178,6 +183,29 @@ export function validateSliceReady(
       line: slice.line,
       refs: [sliceKey],
     });
+  }
+
+  // GH #259: with a ratifier roster present, a `ratifiedBy` it does not permit for this slice's
+  // context — the hand-edited-frontmatter case `em slice ratify`'s own refusal cannot see.
+  // `grandfathered ...` is em's own migration marker, not a signer, so it is exempt (it stays a
+  // finding of --require-ratified-hash and a human re-ratify item). Only `ready-to-implement`
+  // docs are checked here; `em roster check` also covers shipped docs.
+  if (doc.status === "ready-to-implement" && doc.ratifiedBy && !isGrandfatheredSignoff(doc.ratifiedBy, doc.ratifiedHash)) {
+    const roster = loadRoster(baseDir, options.rosterPath, rosterContextFor(model, contract.file));
+    if (roster.state === "invalid") {
+      for (const d of roster.diagnostics) {
+        pushDiag(diags, "roster-invalid", { message: `${roster.path}: ${d.message}`, line: slice.line, refs: [sliceKey] });
+      }
+    } else if (roster.state === "present") {
+      const why = rosterRefusal(roster.roster, "ratifiers", doc.ratifiedBy, sliceContexts(model, sliceIndex), computeModelKey(model, contract.file));
+      if (why !== null) {
+        pushDiag(diags, "ratified-by-not-in-roster", {
+          message: `slice "${sliceKey}": ratifiedBy ${why} (${roster.path}) — re-ratify with a permitted name, or update the roster`,
+          line: slice.line,
+          refs: [sliceKey],
+        });
+      }
+    }
   }
 
   // GH #256: strict mode — the body-changed check above can only run when a hash exists, so
