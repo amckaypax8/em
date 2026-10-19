@@ -119,6 +119,7 @@ command deliberately never touches. See [cli.md#em-ledger-file](cli.md#em-ledger
 | A declared `type` name defined more than once — unconditional, unlike the element check above (there's no legitimate unreferenced-duplicate case for a named type) | Rename; references resolve to the first occurrence |
 | A model `owner` that is not a CODEOWNERS handle (`owner-not-a-handle`, MIL-234): not `@user`, `@org/team` or an email, e.g. the free text `"Storefront team"` | Write `owner "@org/team"`; `em system codeowners` skips a non-handle owner |
 | A slice outside every storyline, once the model declares any `storyline` block (`slice-outside-storyline`, GH #277 — advisory so a model can adopt storylines incrementally) | Move the slice inside one of the storylines — see [Storylines](#storylines) |
+| A run of 3 or more consecutive State Change slices that all write one context, with the next view reading only that context (`timeline-entity-clustered`, GH #281) | If they are create/update/archive operations on one entity, order the slices by the business journey, interleaving contexts; if they are steps of one journey, show a screen after each step — see [Shape](#shape) |
 | An element carries an open `issue "text"` | Resolve the question, then remove the clause |
 | A `view` field with no matching field on any source event, and not marked `derived` | Add the field to the event, drop it from the view, or mark it `derived` if it's genuinely computed from which events have landed |
 | An `event` field not provided by any command in its slice | Add the field to the command, or drop it from the event |
@@ -218,6 +219,33 @@ or *forward* `loops-to` does **not** count: the event still warns as unread, on 
 All seven are warnings rather than errors on purpose. A model under construction spends most of
 its life with one end of a flow ahead of the other, and errors block rendering — `em watch`
 would stop redrawing mid-session exactly when you most want to see the diagram.
+
+### Shape
+
+`timeline-entity-clustered` (GH #281) is an advisory lint for the lifecycle-per-entity shape: a
+model written as CRUD on a timeline instead of in business-journey order. It fires on a run of
+at least 3 consecutive State Change slices whose events all sit on **one** context, when the
+next view-bearing slice reads only that context and no view fed by another context sits inside
+the run. It fires once per run; `--json` carries `refs` to every slice key in the run, and the
+message names the first and last slice and the context. The threshold is a constant
+(`TIMELINE_ENTITY_CLUSTER_MIN_RUN`), not configurable: for 1.18.0 the thresholds of the shape
+lints are constants, with a rules-config knob tracked as Backlog.
+
+The message gives two outcomes, because the shape alone cannot tell them apart. If the slices
+are create/update/archive operations on one entity, reorder them by the business journey,
+interleaving contexts as the story does. If they are consecutive steps of one journey (for
+example place order, add line, confirm order), the hit points at a missing intermediate
+screen: show what the user sees between the steps, a view after each step.
+
+The lint is exempt for a model with fewer than 2 distinct event contexts (no `@Context` at all,
+or every event on one): there is nothing to interleave. A trailing `view ... again` instance is
+judged by its logical view's union of sources across all instances, consistent with the
+`slice sync` view region.
+
+Reorder by the story ("create a class, then its attributes, then a product that uses them") and
+the run breaks up; the lint goes quiet without any suppression. It is a warning like every other
+here — it never blocks a render — and it carries the `shape` family so a shape-only selector can
+pick it out. See [storyline.md](storyline.md) for the ordering method.
 
 ### Translation naming
 
