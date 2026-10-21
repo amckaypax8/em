@@ -257,6 +257,16 @@ export function effectiveTracking(sliceTracking: string | null, engagementTracki
   return sliceTracking ?? engagementTracking;
 }
 
+/** GH #334: the PR title for one slice. `{sliceKey}` is the slice key as written in the model. The default is `{key}: {slice}` with a tracking key and
+ *  `{slice}` without. A custom template substitutes `{key}` and `{slice}`; a template that uses
+ *  `{key}` on a slice with no tracking key falls back to the default without a key. */
+export const DEFAULT_PR_TITLE = "{key}: {slice}";
+export function resolvePrTitle(template: string | null, tracking: string | null, slice: string, sliceKey: string = slice): string {
+  const fill = (t: string) => t.split("{sliceKey}").join(sliceKey).split("{slice}").join(slice);
+  if (tracking === null) return template === null || template.includes("{key}") ? slice : fill(template);
+  return fill((template ?? DEFAULT_PR_TITLE).split("{key}").join(tracking));
+}
+
 export function effectiveState(entry: EngagementSliceEntry, docShipped: boolean): { state: LedgerState; stateInferred: boolean } {
   if (entry.state !== "merged" && docShipped) return { state: "merged", stateInferred: true };
   return { state: entry.state, stateInferred: false };
@@ -377,6 +387,8 @@ export interface EngagementPlanSlice {
   stateInferred: boolean;
   /** GH #241: the ticket key this slice's PR cites (slice doc `tracking:` wins over the engagement's). */
   tracking: string | null;
+  /** GH #334: the exact PR title the implementer is handed (the engagement's `prTitle` template, or the default, resolved). */
+  prTitle: string;
 }
 
 export interface EngagementPlanLevel {
@@ -390,7 +402,7 @@ export interface EngagementPlanLevel {
  *  implementer would otherwise rediscover and report on its own. Advisory: never a hold, never
  *  written to the Ledger; the lead puts the whole list to the human in ONE question round before
  *  fan-out (skill §2). Each finding names the slices it spans so the answer lands once. */
-export type PreflightKind = "repeated-invariant" | "event-without-tag" | "shared-trigger" | "doc-model-mismatch" | "shape";
+export type PreflightKind = "repeated-invariant" | "event-without-tag" | "shared-trigger" | "doc-model-mismatch" | "shape" | "pr-title-fallback";
 
 export interface PreflightFinding {
   kind: PreflightKind;
@@ -407,6 +419,8 @@ export interface EngagementPlan {
   slug: string;
   status: "open" | "closed";
   tracking: string | null;
+  /** GH #334: the engagement's `prTitle` template; null when absent. */
+  prTitle: string | null;
   parallel: number;
   levels: EngagementPlanLevel[];
   slices: EngagementPlanSlice[];
@@ -580,6 +594,8 @@ export function buildEngagementPlan(input: EngagementModelInput, engagementFile:
       if (!ready) planHeld = "not-ready";
       else if (unmergedOut.length > 0) planHeld = "upstream-outside-engagement-unmerged";
     }
+    const tracking = effectiveTracking(idx.docTracking.get(key) ?? null, eng.tracking);
+    const sliceName = input.model.slices[idx.sliceIndexOf.get(key) ?? -1]?.name ?? key;
     return {
       key,
       pattern: idx.pattern.get(key) ?? "unknown",
@@ -594,7 +610,8 @@ export function buildEngagementPlan(input: EngagementModelInput, engagementFile:
       held: planHeld ?? (entry.heldBy === "human" && state === "held" ? "human" : null),
       state,
       stateInferred,
-      tracking: effectiveTracking(idx.docTracking.get(key) ?? null, eng.tracking),
+      tracking,
+      prTitle: resolvePrTitle(eng.prTitle, tracking, sliceName, key),
     };
   });
 
@@ -607,7 +624,18 @@ export function buildEngagementPlan(input: EngagementModelInput, engagementFile:
   // Slices listed level by level, model order within a level.
   slices.sort((a, b) => a.level - b.level || order(a.key, b.key));
   const preflight = computePreflight(input, members, idx);
-  return { ok: true, plan: { file: input.file, engagement: engagementFile, slug: eng.slug, status: eng.status, tracking: eng.tracking, parallel: eng.parallel, levels, slices, preflight } };
+  // GH #334: advisory — a `{key}` template on a keyless slice fell back to the bare default title.
+  if (eng.prTitle !== null && eng.prTitle.includes("{key}")) {
+    for (const s of slices.filter((x) => x.tracking === null)) {
+      preflight.push({
+        kind: "pr-title-fallback",
+        subject: s.key,
+        slices: [s.key],
+        message: `slice ${s.key} has no tracking key, so its PR title falls back to "${s.prTitle}" instead of the engagement's prTitle template "${eng.prTitle}"`,
+      });
+    }
+  }
+  return { ok: true, plan: { file: input.file, engagement: engagementFile, slug: eng.slug, status: eng.status, tracking: eng.tracking, prTitle: eng.prTitle, parallel: eng.parallel, levels, slices, preflight } };
 }
 
 /** Walk predecessors among the unlevelled nodes until one repeats: `a -> b -> a` (upstream
@@ -638,7 +666,10 @@ export function formatEngagementPlanText(p: EngagementPlan): string {
   }
   // GH #239: the one question round before fan-out. Advisory — nothing above is held by it.
   if (p.preflight.length > 0) {
-    lines.push(`pre-flight: ${p.preflight.length} model-wide gap(s) the engagement's slices share — answer once, before dispatch`);
+    const perSlice = p.preflight.filter((f) => f.kind === "pr-title-fallback").length;
+    const modelWide = p.preflight.length - perSlice;
+    const parts = [modelWide > 0 ? `${modelWide} model-wide gap(s) the engagement's slices share — answer once, before dispatch` : null, perSlice > 0 ? `${perSlice} per-slice PR-title advisory(ies)` : null].filter(Boolean);
+    lines.push(`pre-flight: ${parts.join("; ")}`);
     for (const f of p.preflight) lines.push(`  ${f.kind}: ${f.message}`);
   }
   return lines.join("\n");
@@ -690,6 +721,8 @@ export interface NewEngagementOptions {
   createdBy: string | null;
   /** GH #241: `--tracking` — a ticket key or URL; null/absent when not given. */
   tracking?: string | null;
+  /** GH #334: `--pr-title` — a PR title template using `{key}` and `{slice}`; null/absent when not given. */
+  prTitle?: string | null;
   created: string;
 }
 
@@ -700,6 +733,8 @@ export function buildNewEngagement(input: { file: string; model: NormalizedModel
   if (!Number.isInteger(opts.parallel) || opts.parallel < 1) return { ok: false, message: "--parallel must be a positive integer" };
   const tracking = opts.tracking === undefined || opts.tracking === null ? null : opts.tracking.trim();
   if (tracking !== null && (tracking === "" || /[\r\n]/.test(tracking))) return { ok: false, message: "--tracking must be a non-empty single line (a ticket key or URL)" };
+  const prTitle = opts.prTitle === undefined || opts.prTitle === null ? null : opts.prTitle.trim();
+  if (prTitle !== null && (prTitle === "" || /[\r\n]/.test(prTitle))) return { ok: false, message: "--pr-title must be a non-empty single line (a template using {key} and {slice})" };
   const idx = buildUnitIndex(input.model, input.refs, input.baseDir);
   const sel = resolveSelection(input, idx, opts.selector);
   if (!sel.ok) return sel;
@@ -707,12 +742,14 @@ export function buildNewEngagement(input: { file: string; model: NormalizedModel
   const preds = unitPredecessors(input.model, idx);
   const components = selectionComponents(sel.units, idx, preds);
   const fm: EngagementFile = {
-    engagementSchemaVersion: ENGAGEMENT_SCHEMA_VERSION,
+    // A file that does not use `prTitle` stays 1.1, so a teammate or CI on an older em still reads it.
+    engagementSchemaVersion: prTitle === null ? "1.1" : ENGAGEMENT_SCHEMA_VERSION,
     slug: opts.slug,
     model: modelRefFor(engagementPath(input.file, opts.slug), input.file),
     created: opts.created,
     createdBy: opts.createdBy,
     tracking,
+    prTitle,
     parallel: opts.parallel,
     status: "open",
     slices: sel.units.map((key) => ({ key, state: "planned", branch: null, base: null, pr: null })),

@@ -48,6 +48,8 @@ import {
   applyEngagementClose,
   applyEngagementSet,
   buildNewEngagement,
+  buildUnitIndex,
+  effectiveTracking,
   engagementMembersFor,
   engagementPlanFor,
   engagementStatusFor,
@@ -2911,12 +2913,13 @@ engagement
   .option("--parallel <n>", "how many slices of one level may be in flight at once", "3")
   .option("--by <name>", "who created the engagement (createdBy)")
   .option("--tracking <key>", "an issue-tracker key or URL the slice PRs cite (a slice doc's own tracking: wins)")
+  .option("--pr-title <template>", "PR title template for the slice PRs; {key} = tracking key, {slice} = slice name, {sliceKey} = slice key (default \"{key}: {slice}\", or \"{slice}\" without a key)")
   .option("--force", "overwrite an existing engagement file with this slug")
   .action(
     (
       file: string,
       slug: string,
-      opts: { slices?: string; context?: string; downstreamOf?: string; parallel: string; by?: string; tracking?: string; force?: boolean },
+      opts: { slices?: string; context?: string; downstreamOf?: string; parallel: string; by?: string; tracking?: string; prTitle?: string; force?: boolean },
     ) => {
       const fail = (m: string): never => {
         console.error(`em engagement new: ${m}`);
@@ -2935,11 +2938,20 @@ engagement
       const path = engagementPath(file, slug);
       const result = buildNewEngagement(
         { file, model, refs, baseDir: dirname(file) },
-        { slug, selector, parallel, createdBy: opts.by ?? null, tracking: opts.tracking ?? null, created: localIsoDate() },
+        { slug, selector, parallel, createdBy: opts.by ?? null, tracking: opts.tracking ?? null, prTitle: opts.prTitle ?? null, created: localIsoDate() },
       );
       if (!result.ok) return fail(result.message);
       if (existsSync(path) && !opts.force) fail(`engagement "${slug}" already exists (${path}) — pass --force to overwrite`);
       if (result.warning) console.error(result.warning);
+      if (opts.prTitle !== undefined && opts.prTitle.includes("{key}")) {
+        const uidx = buildUnitIndex(model, refs, dirname(file));
+        const keyless = result.units.filter((u) => effectiveTracking(uidx.docTracking.get(u) ?? null, opts.tracking?.trim() || null) === null);
+        if (keyless.length > 0) {
+          console.error(
+            `em engagement new: --pr-title uses {key}; slices without a tracking key fall back to the default title "{slice}" (the slice name): ${keyless.join(", ")} — pass --tracking or set tracking: in the slice docs`,
+          );
+        }
+      }
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, result.text);
       console.log(`wrote ${path} (${result.units.length} slice${result.units.length === 1 ? "" : "s"}: ${result.units.join(", ")})`);

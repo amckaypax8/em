@@ -71,7 +71,11 @@ Run the shared preconditions first (tool check, bundle currency, locate the mode
 5. **The engagement exists.** `em engagement status <model>.em <slug>`. If there is no such
    engagement, ask the human which slices it covers (a list, a context, or "everything
    downstream of X") and run `em engagement new <model>.em <slug> --slices a,b,c` (or
-   `--context <C>`, or `--downstream-of <ref>`) `--by "<their name>"`. When `new` warns that the
+   `--context <C>`, or `--downstream-of <ref>`) `--by "<their name>"`. First check the host
+   repo's PR-title convention (a commitlint config, a PR-title workflow, or the last few merged
+   PR titles) and pass `--pr-title "<template>"` when it differs from the default
+   `<key>: <slice name>`; placeholders are `{key}`, `{slice}` (display name) and `{sliceKey}`
+   (kebab key, usually what a lint wants). When `new` warns that the
    selection has several unconnected components, relay its suggestion (one engagement each)
    and let the human decide before going on.
 
@@ -117,10 +121,13 @@ For each slice the plan lists as not held:
 4. Record it:
    `em engagement set <model>.em <slug> <key> --state building --branch impl/<key> --base <base>`
 5. Dispatch `em-implementer` (`em:em-implementer` under the plugin) on the implementer model.
-   Its prompt is ONLY the slice key, the absolute worktree path and, when the plan's slice
-   carries one, its tracking key (`tracking` in `em engagement plan --json` — GH #241). That
-   field is already resolved: the slice doc's own `tracking:` wins over the engagement's
-   `--tracking`, and it is `null` when neither is set (then say nothing about tracking). It reads
+   Its prompt is ONLY the slice key, the absolute worktree path, the exact pull-request title
+   and, when there is one, the tracking key. The title is the slice's `prTitle` from
+   `em engagement plan --json` (GH #334), already resolved from the engagement's `--pr-title`
+   template or the default: pass it verbatim and never compose one. The tracking key is the
+   plan's `tracking` (GH #241), already resolved: the slice doc's own `tracking:` wins over the
+   engagement's `--tracking`, and it is `null` when neither is set (then say nothing about
+   tracking). Surface any `pr-title-fallback` pre-flight entry to the human. It reads
    its own spec, the constitution and the implement contract. Give it no plan, no other slice,
    and no merge instructions.
 
@@ -132,7 +139,7 @@ When the implementer returns a PR URL (and a per-invariant test map):
    base: `gh pr view <url> --json baseRefName` must be `main`. If not, fix it with
    `gh pr edit <url> --base main`. That is a lead step; the implementer never changes a base.
 2. Dispatch `em-validator` (`em:em-validator`) with the slice key, the worktree path and the same
-   tracking key (when the slice has one). It
+   tracking key (when the slice has one) and the same `prTitle`. It
    returns one PASS/FAIL line per check and `OVERALL: PASS` or a failure.
 3. On `OVERALL: PASS`: `em engagement set <model>.em <slug> <key> --state review`. Dispatch
    `em-reviewer` (`em:em-reviewer`) with the slice key and the PR URL. Dispatch `em-critic`
