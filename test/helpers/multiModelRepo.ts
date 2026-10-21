@@ -11,6 +11,7 @@
 //   repo.cleanup();                                // rm -rf (call from afterEach/afterAll)
 
 import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmTemp } from "./rmTemp.js";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -154,7 +155,12 @@ export function makeMultiModelRepo(opts: MultiModelRepoOptions = {}): MultiModel
   git("config", "user.email", "t@t.test");
   git("config", "user.name", "t");
   git("config", "commit.gpgsign", "false");
+  // No auto-maintenance: a detached maintenance/gc child can outlive `git commit` and keep
+  // writing under .git while cleanup removes the dir (ENOTEMPTY, GH #330).
+  git("config", "maintenance.auto", "false");
+  git("config", "gc.auto", "0");
+  git("config", "maintenance.autoDetach", "false");
   git("add", "-A");
   git("commit", "-q", "-m", "init");
-  return { dir, manifest, checkout, fulfillment, git, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return { dir, manifest, checkout, fulfillment, git, cleanup: () => rmTemp(dir) };
 }
