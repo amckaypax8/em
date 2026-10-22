@@ -32,20 +32,27 @@ cherry-pick each one individually:
 4. `state-file` — add any missing state-file bullets with their defaults, byte-for-byte
    otherwise.
 5. `ci-block` — refresh the generated block in `.github/workflows/em-ci.yml`, only when
-   that block already exists. Directly after it, `api-contract-missing` (GH #331, 1.18.1): when the
+   that block already exists. Since 1.19.0 (GH #346) it also rewrites the header's `pull_request.paths`
+   (outside the managed block) when it is exactly the old three-entry list (`**/*.em`, `**/slices/**`,
+   `**/README.md`), so an upgrade PR triggers CI; a hand-edited filter is left alone (human item
+   `ci-paths-hand-edited`) and a workflow with its markers removed is untouched. Directly after it,
+   `api-contract-missing` (GH #331, 1.18.1): when the
    generated workflow carries an `api-check` job and `contracts/<model key>.tsp` is absent, run
    `em api generate` for it (own commit), so one `--apply` leaves `api-check` passing.
 6. `constitution` — scaffold `constitution.md` (draft, unratified) when it's absent and the
    repo has no `.specify/` directory.
 7. `ratified-signoff` — grandfather `ready-to-implement` docs that never recorded a sign-off (see
    [1.14.0](#1140)).
-8. `ratified-hash-scope` — re-stamp every `ratifiedHash:` recorded before 1.17.0 (whole-body
-   scope) with the 1.17-scope hash of the same body — the `## Open Questions` heading and its
-   `deferred to v<n>` items are outside the hash now (GH #253, see [1.17.0](#1170)) — and move
-   any question 1.16's `em slice defer` queued in `.event-modeling.md` into its doc as a deferred
-   item. A doc whose body no longer matches its hash is reported and left alone.
+8. `ratified-hash-scope` — re-stamp every `ratifiedHash:` recorded before 1.19.0 with the
+   1.19-scope hash of the same body (GH #347, see [1.19.0](#1190)): the authored text only, so the
+   text inside generated regions, the `## Open Questions` heading and its `deferred to v<n>` items are
+   all outside the hash (1.17's GH #253 exclusions, see [1.17.0](#1170), plus the regions). Covers both
+   old scopes: whole body (before 1.17.0) and 1.17.0–1.18.x (regions inside). `ratifiedRef` is untouched.
+   It also moves any question 1.16's `em slice defer` queued in `.event-modeling.md` into its doc as a
+   deferred item. A doc whose body matches no scope is reported (`left alone: <keys>`) and left alone.
+   After this step a 1.18.x build rejects the re-stamped docs, so move every em pin together.
 9. `collapse-alternative-events`, `fold-continuations` (opt-in), `view-doc-sources-stale`, `slice-index-stale`,
-   `parking-lot-fragments` — five 1.18.0 steps (see [1.18.0](#1180-unreleased)); they run just before
+   `parking-lot-fragments` — five 1.18.0 steps (see [1.18.0](#1180)); they run just before
    `system-manifest`, which stays last. The first two rewrite the `.em`; the steps after them see the rewritten model.
 10. `system-manifest` — migrate the nearest `system.yaml` (found by walking up from the model to
    the repository root) from schema 1.0 to 2.0. Each 1.0 seam becomes a
@@ -117,9 +124,12 @@ detects and reports them:
   per-user registration; run `claude plugin marketplace add milehimikey/em@v<ver> --scope project`
   then `claude plugin install em@em-<ver-dashed> --scope project`, on each developer machine and in
   CI (the generated workflow does it).
-- **stale region in a signed doc** (`slice-doc-stale-signed`, 1.18.0) — a ratified or shipped doc whose
-  generated region (view, event, …) is stale against the model; the steps never touch it (syncing would move its
-  `ratifiedHash`): `em slice revise <key>`, then `em slice sync`.
+- **stale region in a signed doc** (`slice-doc-stale-signed`, 1.18.0; reworded 1.19.0) — a ratified or shipped doc whose
+  generated region (event, command, invariants, …) is stale against the model and that no step syncs: run
+  `em slice sync <model>.em`; it rewrites the regions and keeps the signature (`ratifiedHash` covers the authored text only, GH #347).
+- **CI path filter hand-edited** (`ci-paths-hand-edited`, 1.19.0) — the `pull_request.paths` filter in
+  `em-ci.yml` was edited by hand and lacks entries of the current preset, so an upgrade PR may get no CI run;
+  `em upgrade` lists the missing entries and leaves the file alone (GH #346).
 - **missing lineage back-link** (`lineage-backlink-missing`, 1.18.0) — an archived doc names a signed successor in
   `superseded-by` that lacks `merged-from: <key>@v<N>`; add the line (frontmatter is outside the hash).
 - **fold continuations** (`fold-continuations-opt-in`, 1.18.0) — the opt-in step has a proposal; run
@@ -507,3 +517,28 @@ em upgrade <model>.em --apply    # one git commit per step, then the final `Em v
 ```
 
 The 1.18.1 steps, in order: `api-contract-missing` (right after `ci-block`). Human items: `api-contract-blocked` (a model whose contract could not be generated: run `em validate <model>`, fix it, then `em api generate <model>`).
+
+## 1.19.0
+
+| What changed for a model repo | Handled by `em upgrade`? |
+|---|---|
+| **`ratifiedHash` covers the authored text only** (GH #347, [slice-doc-schema.md](slice-doc-schema.md)): the text between generated region markers is outside the hash, so `em slice sync` rewrites a ratified or shipped doc's regions and keeps `ratifiedHash` and `ratifiedRef` (it prints a `note:` saying so). A hash recorded by 1.17.0–1.18.x (regions inside) or before 1.17.0 (whole body) whose body is intact is still read as intact by every reader (`--check-signed-bodies`, `--slice-ready`, `ratify --again`, `defer`, `ledger`), so nothing breaks before the upgrade. **Converse:** a hand edit *inside* a generated region of a signed doc is no longer reported by `--check-signed-bodies`, `--slice-ready` or `em ledger`; the signals that remain are `em slice sync --check` (recommended in CI, see [ci.md](ci.md)), the model's own validation and the model-version pin. **Pin em together:** once `em upgrade --apply`, `em slice sync` or `em slice defer` re-stamps a doc to the 1.19 scope, a 1.18.x build rejects that doc (`em validate --check-signed-bodies` exits 1, "edited after ratification"; `--slice-ready` reports not ready), so federated repos and CI jobs must move every em pin (dependency, plugin pin, mise) to 1.19.0 together, before the sweep | `ratified-hash-scope` (since 1.19.0) re-stamps each intact 1.17–1.18 or pre-1.17 hash with the current-scope hash of the same body; not a re-signing, `ratifiedRef` untouched. A doc whose body matches no scope is listed (`left alone: <keys>`) and left alone. `em slice sync` and `em slice defer` also re-stamp such a hash on first touch |
+| **A ratified or shipped doc with stale generated regions no longer needs `em slice revise` and a re-ratification** (GH #347): for example the 1.18.0 sync output change | mechanical: `view-doc-sources-stale` now syncs signed docs, and so does `collapse-alternative-events` for the kept slice's doc. Left to `human:` `em slice sync <model>.em`: any other doc the collapse rewrite makes stale, every doc `fold-continuations` makes stale (it rewrites the `.em` and syncs no doc; its reason names them) and any signed doc stale in a non-view region (the item `slice-doc-stale-signed`, which now says "run `em slice sync`" rather than "revise first") |
+| **New warning `slice-doc/generated-region-placeholder`** (GH #347, [validation.md](validation.md)): a ratified or shipped doc with an unresolved `{{ }}` inside a generated region (for example the GH #288 collection scenario stubs); one warning per region. It does not gate `--slice-ready` | no action needed. Fill the model gap and re-sync, or write the scenario in `## Scenarios` in the next version |
+| **`fields-completeness/event-field-no-source` checks every command that records the event** (GH #344, [validation.md](validation.md#fields-completeness)): warnings disappear when another command recording the same event (a bare repeat in another slice) provides the field, and when ANY recording command of the event is fieldless. N per-repeat warnings collapse to one, at the first instance's line. The message reads `any of commands "A", "B"` and refs every recording command, so `--slice-ready` on a repeat slice can be gated by a diagnostic whose line sits in another slice. Generated `em-slice-event` regions now name a cross-slice source (`from command \`A\` (slice "Create")` instead of `{{ }}`), so `em slice sync --check` reports those regions stale | `human:` run `em slice sync <model>.em`. Since GH #347 sync rewrites a signed doc's regions and keeps its signature (no `em slice revise` first) |
+| **The `em ci init` preset triggers `pull_request` on the files an upgrade PR touches** (GH #346, [ci.md](ci.md)): `.github/workflows/em-*.yml`, `**/.event-modeling.md`, `.claude/settings.json`, `**/ratifiers.yaml`, `**/system.yaml` and `**/contracts/**` join `**/*.em`, `**/slices/**` and `**/README.md`, so an `em upgrade --apply` PR runs the gates. The filter lives in the workflow header, outside the managed block | `ci-block` (and `em ci init`, which prints `pull_request paths filter updated to the 1.19.0 list`; `em ci init --check` reports the old list as drift) rewrites the filter when it is exactly the old three-entry list. A hand-edited filter is left alone and becomes the human item `ci-paths-hand-edited` (lists the missing entries); a workflow with its markers removed is untouched |
+| **A view collection field traces through nested event element types** (GH #345, [dsl.md](dsl.md)): `T[] derived from "E"` no longer warns `view-field-no-source` for an element field declared on the element type of an array field of the named event (`optionValues: VariantOptionValue[]`); one level only, no path syntax | no action needed |
+| **`em engagement new --storyline <name>`** (GH #348, [cli.md](cli.md)): a fourth selector, beside `--slices`, `--context` and `--downstream-of`, takes every slice of a declared storyline (case- and whitespace-insensitive; a continued storyline is one). A continuation declared in an earlier storyline pulls its originating unit in, with a stderr `note:` per continuation. `em query slices --storyline` now also collapses inner whitespace. Plan JSON unchanged | no action needed |
+| Test-only: shared `gitInitQuiet` fixture helper (GH #338) | no action needed (nothing changes for a model repo) |
+| **Release note: run `em upgrade <model>.em` (dry-run, then `--apply`) in each consumer repo** — one widened mechanical step (`ratified-hash-scope`, now also the 1.17→1.19 scope), `ci-block` also rewrites the CI path filter; update the `@milehimikey/em` dependency and move the plugin pin to `em-1-19-0` / `v1.19.0` (and mise) together. No schema bumps. | `em upgrade` |
+
+### Upgrading to 1.19.0
+
+Update the `@milehimikey/em` dependency (and the plugin pin to `em-1-19-0` / `v1.19.0` on plugin repos, and the mise pin), all together, then in each consumer repo:
+
+```bash
+em upgrade <model>.em            # dry-run: lists every step below and the human items
+em upgrade <model>.em --apply    # one git commit per step, then the final `Em version:` commit
+```
+
+The 1.19.0 steps, in order: `ci-block` (now also rewrites the header's `pull_request.paths` when it is the exact old list) and `ratified-hash-scope` (now also re-stamps 1.17–1.18 hashes), plus `view-doc-sources-stale` and `collapse-alternative-events` syncing signed docs. Human items: `ci-paths-hand-edited`, `slice-doc-stale-signed` (now "run `em slice sync`"). Then run `em slice sync <model>.em` once to refresh generated `em-slice-event` regions, and consider `em slice sync --check` in CI (see [ci.md](ci.md)).
