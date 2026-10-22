@@ -543,6 +543,24 @@ em upgrade <model>.em --apply    # one git commit per step, then the final `Em v
 
 The 1.19.0 steps, in order: `ci-block` (now also rewrites the header's `pull_request.paths` when it is the exact old list) and `ratified-hash-scope` (now also re-stamps 1.17–1.18 hashes), plus `view-doc-sources-stale` and `collapse-alternative-events` syncing signed docs. Human items: `ci-paths-hand-edited`, `slice-doc-stale-signed` (now "run `em slice sync`"). Then run `em slice sync <model>.em` once to refresh generated `em-slice-event` regions, and consider `em slice sync --check` in CI (see [ci.md](ci.md)).
 
+## 1.19.2
+
+| What changed for a model repo | Handled by `em upgrade`? |
+|---|---|
+| **Repeat-slice `em-slice-event` regions reword the cross-slice source** (GH #362, [slice-doc-schema.md](slice-doc-schema.md#generated-regions-and-authored-sections)): a field this slice's command does not take but another recording command supplies now reads `not supplied by this command (from \`A\`, slice "Create")` instead of `from command \`A\` (slice "Create")`, so the cell is a statement about this slice rather than about the other command. Same-slice sources, `assigned` and `{{ }}` are unchanged. Only models with a repeated event whose commands supply different fields (GH #344) are affected; on those, `em slice sync --check` reports the region stale | `human:` run `em slice sync <model>.em`. Generated regions are outside the ratified hash since GH #347, so the signature is kept and no `em slice revise` is needed |
+| **Release note: update the `@milehimikey/em` dependency and move the plugin pin to `em-1-19-2` / `v1.19.2` (and mise) together.** No `em upgrade` step, no schema bumps. | no action needed |
+
+### Upgrading to 1.19.2
+
+Update the `@milehimikey/em` dependency (and the plugin pin to `em-1-19-2` / `v1.19.2` on plugin repos, and the mise pin), all together, then in each consumer repo:
+
+```bash
+em slice sync <model>.em --check   # lists repeat-slice event regions whose label changed
+em slice sync <model>.em           # rewrites them; signatures are kept (GH #347)
+```
+
+`em upgrade <model>.em` has no 1.19.2 step and only bumps the `Em version:` line. Models without a repeated event whose commands supply different fields see no change.
+
 ## 1.19.1
 
 | What changed for a model repo | Handled by `em upgrade`? |
