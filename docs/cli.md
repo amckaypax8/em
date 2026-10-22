@@ -2213,7 +2213,7 @@ slice's doc through a ratified `covers:` entry folds into that slice.
 every to-do list and its reaction a cycle. Edges are lifted from elements to units, and an
 upstream whose doc is already `implemented` imposes nothing.
 
-### `em engagement new <file> <slug> (--slices a,b,c | --context <C> | --downstream-of <ref>) [--parallel N] [--by <name>] [--tracking <key>] [--pr-title <template>] [--force]`
+### `em engagement new <file> <slug> (--slices a,b,c | --context <C> | --storyline <name> | --downstream-of <ref>) [--parallel N] [--by <name>] [--tracking <key>] [--pr-title <template>] [--force]`
 
 Writes `engagements/<slug>.md` with every selected slice at state `planned`, and records the
 model it belongs to (`model:`, relative to the file). Every other subcommand refuses a model
@@ -2223,6 +2223,17 @@ selector:
 
 - `--slices`: [slice keys](#slice-keys) — export keys, display names or unique prefixes, stored as export keys. An unresolvable key is refused with the valid keys listed.
 - `--context <C>`: every slice with an event in context `<C>` (case-insensitive).
+- `--storyline <name>` (GH #348): every slice declared in the `storyline` block `<name>`, resolved from
+  the model (case- and whitespace-insensitive, the same normalisation as `em render --storyline` and
+  `em query slices --storyline`; nothing is recorded on the slice), folded to unit keys in model order.
+  A continued storyline (a second block with the same name) is one storyline. A storyline declared
+  `after "Other"` selects its own slices, plus the originating unit of any continuation slice
+  (`view X again`), which may be declared in an earlier storyline: a continuation has no unit of its
+  own, its work is specified on the origin. Each such pulled-in unit is announced on stderr
+  (`note: em engagement new: <slice> continues <view> from storyline "<Other>"; its unit <origin> is selected`);
+  if that unit is already implemented the plan treats it as imposing nothing. What else the storyline
+  reads from `Other` is upstream, as with `--context`. An unknown name is refused with the declared
+  storylines listed.
 - `--downstream-of <ref>`: a slice key (all its elements), an element ref, or a display name,
   resolved the way `em query` resolves it, plus everything downstream of it (`loops-to` excluded).
 
@@ -2245,7 +2256,7 @@ or use a key-free template (`feat: {sliceKey}`). Free text, one non-empty line
 (`--pr-title must be a non-empty single line (a template using {key} and {slice})`). `new` writes
 `engagementSchemaVersion: "1.1"` unless `--pr-title` is given (then `"1.2"`), so older tooling still
 reads files that do not use it. Refusals (exit 1, stderr): `pass exactly one of --slices,
---context, --downstream-of`; `the selection is empty — nothing to engage`; `invalid slug "<s>"
+--context, --storyline, --downstream-of`; `the selection is empty — nothing to engage`; `invalid slug "<s>"
 — expected kebab-case (a-z, 0-9, -)`; `--parallel must be a positive integer`; `engagement
 "<slug>" already exists (<path>) — pass --force to overwrite`.
 

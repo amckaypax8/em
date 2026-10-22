@@ -20,6 +20,7 @@ import { RefsResult } from "../model/refs.js";
 import { resolveSliceKey } from "../model/resolveSlice.js";
 import { Diagnostic, serializeDiagnostic } from "../model/validate.js";
 import { semanticEdges } from "../model/edges.js";
+import { findStoryline, storylineOfSlice } from "../model/storylines.js";
 import { classifySlicePattern } from "../catalog/classify.js";
 import { loadSliceDocsOnce, joinSliceDocFast } from "../model/sliceDocIndex.js";
 import { computeSliceReadiness, ContractCheckInput } from "../catalog/sliceReadyValidate.js";
@@ -144,7 +145,7 @@ const byOrder = (idx: UnitIndex) => (a: string, b: string) => (idx.sliceIndexOf.
 
 // ---- selection (`new`) ----
 
-export type Selector = { kind: "slices"; keys: string[] } | { kind: "context"; context: string } | { kind: "downstream-of"; ref: string };
+export type Selector = { kind: "slices"; keys: string[] } | { kind: "context"; context: string } | { kind: "storyline"; name: string } | { kind: "downstream-of"; ref: string };
 
 export type SelectionResult = { ok: true; units: string[] } | { ok: false; message: string };
 
@@ -161,6 +162,23 @@ export function resolveSelection(input: { file: string; model: NormalizedModel; 
     const want = sel.context.toLowerCase();
     model.slices.forEach((slice, i) => {
       if (slice.elements.some((el) => el.kind === "event" && (el.context ?? "").toLowerCase() === want)) picked.add(idx.unitOfSlice[i]);
+    });
+  } else if (sel.kind === "storyline") {
+    // GH #348: resolved from the model (`findStoryline`, as `em render --storyline` and
+    // `em query slices --storyline` do); a continued storyline is one storyline; `after` is ignored.
+    const found = findStoryline(model, sel.name);
+    if (!found) {
+      const declared = (model.storylines ?? []).map((s) => s.name);
+      return {
+        ok: false,
+        message:
+          declared.length === 0
+            ? `--storyline "${sel.name}": no storylines are declared in this model`
+            : `--storyline: no storyline "${sel.name}" (declared: ${[...new Set(declared)].map((n) => `"${n}"`).join(", ")})`,
+      };
+    }
+    model.slices.forEach((_slice, i) => {
+      if (storylineOfSlice(model, i) === found) picked.add(idx.unitOfSlice[i]);
     });
   } else {
     // Starting elements: every element of a named slice, or the one element a ref/display name
@@ -726,6 +744,28 @@ export interface NewEngagementOptions {
   created: string;
 }
 
+/** GH #348: `--storyline` pulls in the originating unit of a continuation (`view X again`) slice even
+ *  when that unit is declared outside the storyline; say so, one note per (continuation, unit). */
+function continuationNotes(model: NormalizedModel, refs: RefsResult, idx: UnitIndex, name: string): string[] {
+  const found = findStoryline(model, name);
+  if (!found) return [];
+  const notes: string[] = [];
+  model.slices.forEach((slice, i) => {
+    if (storylineOfSlice(model, i) !== found) return;
+    for (const el of slice.elements) {
+      if (el.kind !== "view" || !el.again) continue;
+      const origin = model.byId.get(el.logicalId);
+      if (!origin || origin.again || storylineOfSlice(model, origin.sliceIndex) === found) continue;
+      const unit = idx.unitOfSlice[origin.sliceIndex];
+      const other = storylineOfSlice(model, origin.sliceIndex);
+      const from = other ? `storyline "${other.name}"` : "outside any storyline";
+      const note = `note: em engagement new: ${refs.sliceKeys[i]} continues ${el.name} from ${from}; its unit ${unit} is selected`;
+      if (!notes.includes(note)) notes.push(note);
+    }
+  });
+  return notes;
+}
+
 export type NewResult = { ok: true; text: string; units: string[]; warning: string | null } | { ok: false; message: string };
 
 export function buildNewEngagement(input: { file: string; model: NormalizedModel; refs: RefsResult; baseDir: string }, opts: NewEngagementOptions): NewResult {
@@ -741,6 +781,8 @@ export function buildNewEngagement(input: { file: string; model: NormalizedModel
   if (sel.units.length === 0) return { ok: false, message: "the selection is empty — nothing to engage" };
   const preds = unitPredecessors(input.model, idx);
   const components = selectionComponents(sel.units, idx, preds);
+  const notes = opts.selector.kind === "storyline" ? continuationNotes(input.model, input.refs, idx, opts.selector.name) : [];
+  const warnings = [...notes, ...(components.length > 1 ? [formatComponentsWarning(components)] : [])];
   const fm: EngagementFile = {
     // A file that does not use `prTitle` stays 1.1, so a teammate or CI on an older em still reads it.
     engagementSchemaVersion: prTitle === null ? "1.1" : ENGAGEMENT_SCHEMA_VERSION,
@@ -758,7 +800,7 @@ export function buildNewEngagement(input: { file: string; model: NormalizedModel
     ok: true,
     text: renderEngagementFile(fm, buildLedgerLines(fm.slices, ledgerFacts(idx, sel.units))),
     units: sel.units,
-    warning: components.length > 1 ? formatComponentsWarning(components) : null,
+    warning: warnings.length > 0 ? warnings.join("\n") : null,
   };
 }
 

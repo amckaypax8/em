@@ -189,6 +189,121 @@ describe("new: selection", () => {
     expect(r.ok && r.units).toEqual(["place-order"]);
   });
 
+  // GH #348 (acceptance lines noted per test)
+  const storyModel = `model "S"
+context Shop
+
+storyline "Alpha Story" {
+  slice "A One" {
+    command Do A { id: UUID }
+    event A Done { id: UUID }
+  }
+}
+
+storyline "Beta Story" after "Alpha Story" {
+  slice "B One" {
+    command Do B { id: UUID }
+    event B Done { id: UUID }
+  }
+}
+
+storyline "Alpha Story" {
+  slice "A Two" {
+    command Do A2 { id: UUID }
+    event A2 Done { id: UUID }
+  }
+}
+`;
+  const runStory = (name: string) => {
+    const file = join(dir, "story.em");
+    writeFileSync(file, storyModel);
+    return buildNewEngagement(input(file), { slug: "s", selector: { kind: "storyline", name }, parallel: 3, createdBy: null, created: "2026-10-19" });
+  };
+
+  it("--storyline: name is case/whitespace-insensitive and a continued storyline (two blocks) is one storyline, model order [#348 resolves via findStoryline; continued = one]", () => {
+    const r = runStory("  alpha   STORY ");
+    expect(r.ok && r.units).toEqual(["a-one", "a-two"]);
+  });
+
+  it("--storyline: a storyline declared `after` with no continuation selects only its own slices [#348 after, own-slices case]", () => {
+    const r = runStory("Beta Story");
+    expect(r.ok && r.units).toEqual(["b-one"]);
+  });
+
+  it("--storyline: a continuation slice pulls in its origin unit from an earlier storyline, with a stderr note [#348 ruling: unit fold + note]", () => {
+    const src = `model "C"
+context Shop
+
+storyline "First" {
+  slice "Make It" {
+    command Make It { id: UUID }
+    event It Made { id: UUID }
+  }
+  slice "List It" {
+    view It List { id: UUID } from "It Made"
+  }
+}
+
+storyline "Second" after "First" {
+  slice "Break It" {
+    command Break It { id: UUID }
+    event It Broken { id: UUID }
+  }
+  slice "List Broken" {
+    view It List again from "It Broken"
+  }
+}
+`;
+    const file = join(dir, "cont.em");
+    writeFileSync(file, src);
+    const r = buildNewEngagement(input(file), { slug: "c", selector: { kind: "storyline", name: "second" }, parallel: 3, createdBy: null, created: "2026-10-22" });
+    expect(r.ok && r.units).toEqual(["list-it", "break-it"]);
+    expect(r.ok && r.warning).toBe('note: em engagement new: list-broken continues It List from storyline "First"; its unit list-it is selected');
+    // CLI: the note goes to stderr
+    const cli = em(["engagement", "new", "cont.em", "c", "--storyline", "Second"], dir);
+    expect(cli.status).toBe(0);
+    expect(cli.stderr).toContain('list-broken continues It List from storyline "First"; its unit list-it is selected');
+  });
+
+  it("--storyline: an unknown name is refused listing the declared storylines [#348 unknown name]", () => {
+    expect(runStory("Gamma")).toEqual({ ok: false, message: '--storyline: no storyline "Gamma" (declared: "Alpha Story", "Beta Story")' });
+    const file = join(dir, "none.em");
+    writeFileSync(file, 'model "N"\ncontext Shop\nslice "X" {\n  command Do X { id: UUID }\n  event X Done { id: UUID }\n}\n');
+    const r = buildNewEngagement(input(file), { slug: "s", selector: { kind: "storyline", name: "Gamma" }, parallel: 3, createdBy: null, created: "2026-10-19" });
+    expect(r).toEqual({ ok: false, message: '--storyline "Gamma": no storylines are declared in this model' });
+  });
+
+  it("--storyline (CLI): matches `em query slices --storyline` on examples/storylines.em, and is exclusive with the other selectors [#348 fourth selector, exactly one]", () => {
+    const src = join(ROOT, "examples", "storylines.em");
+    writeFileSync(join(dir, "storylines.em"), readFileSync(src, "utf8"));
+    for (const name of ["Bring a product to market", "retire a product"]) {
+      const q = JSON.parse(em(["query", "slices", "storylines.em", "--storyline", name, "--json"], dir).stdout) as { results: { ref: string }[] };
+      const made = em(["engagement", "new", "storylines.em", "st", "--storyline", name, "--force"], dir);
+      expect(made.status).toBe(0);
+      const p = JSON.parse(em(["engagement", "plan", "storylines.em", "st", "--json"], dir).stdout) as { slices: { key: string }[] };
+      const keys = p.slices.map((x) => x.key).sort();
+      expect(keys).toEqual(name === "Bring a product to market" ? ["create-product", "list-products", "publish-product"] : ["archive-product", "list-products"]);
+      // Mapping: every ref `em query slices --storyline` lists is selected, or is a continuation
+      // (`view X again`) slice whose origin unit is selected.
+      const { model, refs } = compile(readFileSync(join(dir, "storylines.em"), "utf8"));
+      const originUnitOf = (ref: string): string | null => {
+        const slice = model.slices[refs.sliceKeys.indexOf(ref)];
+        const el = slice.elements.find((e) => e.kind === "view" && e.again);
+        return el ? refs.sliceKeys[model.byId.get(el.logicalId)!.sliceIndex] : null;
+      };
+      expect(q.results.length).toBeGreaterThan(0);
+      for (const r of q.results) {
+        const origin = originUnitOf(r.ref);
+        expect(keys.includes(r.ref) || (origin !== null && keys.includes(origin))).toBe(true);
+      }
+    }
+    const both = em(["engagement", "new", "storylines.em", "x", "--storyline", "Retire a product", "--context", "Catalog"], dir);
+    expect(both.stderr).toBe("em engagement new: pass exactly one of --slices, --context, --storyline, --downstream-of\n");
+    const bad = em(["engagement", "new", "storylines.em", "x", "--storyline", "Nope"], dir);
+    expect(bad.status).toBe(1);
+    expect(bad.stderr).toContain('--storyline: no storyline "Nope" (declared: "Bring a product to market", "Extend an attribute", "Retire a product")');
+  });
+
   it("--downstream-of follows edges downstream, never back along loops-to", () => {
     const { file } = writeLendingFixture(dir);
     const run = (ref: string) => buildNewEngagement(input(file), { slug: "d", selector: { kind: "downstream-of", ref }, parallel: 3, createdBy: null, created: "2026-10-08" });
@@ -359,7 +474,7 @@ describe("em engagement (CLI)", () => {
     expect(forced.stdout).toBe("wrote engagements/three.md (1 slice: order-list)\n");
 
     expect(em(["engagement", "new", rel, "x", "--slices", "a", "--context", "b"], dir).stderr).toBe(
-      "em engagement new: pass exactly one of --slices, --context, --downstream-of\n",
+      "em engagement new: pass exactly one of --slices, --context, --storyline, --downstream-of\n",
     );
 
     const setOk = em(["engagement", "set", rel, "three", "order-list", "--state", "building", "--branch", "impl/order-list"], dir);
