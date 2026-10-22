@@ -542,3 +542,22 @@ em upgrade <model>.em --apply    # one git commit per step, then the final `Em v
 ```
 
 The 1.19.0 steps, in order: `ci-block` (now also rewrites the header's `pull_request.paths` when it is the exact old list) and `ratified-hash-scope` (now also re-stamps 1.17–1.18 hashes), plus `view-doc-sources-stale` and `collapse-alternative-events` syncing signed docs. Human items: `ci-paths-hand-edited`, `slice-doc-stale-signed` (now "run `em slice sync`"). Then run `em slice sync <model>.em` once to refresh generated `em-slice-event` regions, and consider `em slice sync --check` in CI (see [ci.md](ci.md)).
+
+## 1.19.1
+
+| What changed for a model repo | Handled by `em upgrade`? |
+|---|---|
+| **`em glossary --waive-file <path>`** (GH #355, [cli.md](cli.md#em-glossary-files), [ci.md](ci.md)): field names listed in the file (one per line as `<field> [reason]`: the first whitespace-separated token is the name, the rest a free reason; `#` comments) are excluded from `field-type-conflict`, reported as `waived` (text `N waived`, `--list-conflicts` lines, a top-level `waived` array in `--json` and the MCP `glossary` tool's new `waive_file` parameter, present only when a waiver file is given) and ignored by `--fail-on-conflicts`; `kind-conflict` is never waived and a missing file means no waivers. The `em ci init` glossary job now passes `--waive-file glossary-waivers.txt`: model-dir-relative for a single-model repo (`<model dir>/glossary-waivers.txt`), the repo-root file for a multi-model repo. The line is inside the managed block of `.github/workflows/em-ci.yml` | `ci-block` regenerates the glossary job (the managed block differs, so it is stale). Creating `glossary-waivers.txt` is optional and by hand; until it exists nothing is waived |
+| **Dependency patch** (GH #357): `@modelcontextprotocol/sdk` 1.31.0 to 1.32.0 (4 runtime Dependabot alerts) and `vite` 8.3.2 to 8.3.5 via vitest (6 dev alerts); `package-lock.json` only, `npm audit` clean. MCP behaviour unchanged | no action needed |
+| **Release note: run `em upgrade <model>.em` (dry-run, then `--apply`) in each consumer repo** — the only mechanical change is `ci-block` refreshing the glossary job; update the `@milehimikey/em` dependency and move the plugin pin to `em-1-19-1` / `v1.19.1` (and mise) together. No schema bumps (`glossarySchemaVersion` stays 1.1). | `em upgrade` |
+
+### Upgrading to 1.19.1
+
+Update the `@milehimikey/em` dependency (and the plugin pin to `em-1-19-1` / `v1.19.1` on plugin repos, and the mise pin), all together, then in each consumer repo:
+
+```bash
+em upgrade <model>.em            # dry-run: lists every step below and the human items
+em upgrade <model>.em --apply    # one git commit per step, then the final `Em version:` commit
+```
+
+The 1.19.1 step: `ci-block` (regenerates the `glossary` job with `--waive-file`). No new human items. If `em glossary --fail-on-conflicts` fails on generic names that differ per bounded context, list them in `glossary-waivers.txt` (next to the model for a single-model repo, at the repo root for a multi-model one); see [ci.md](ci.md).
