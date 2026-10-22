@@ -172,6 +172,8 @@ import {
   describeSetChange,
   fileBlockModels,
   planCiFile,
+  refreshCiPullRequestPaths,
+  applyCiPullRequestPathsRefresh,
   applyCiFile,
   findUnsafeCiInitArg,
   CI_WORKFLOW_MARKER,
@@ -3712,6 +3714,10 @@ ci.command("init")
             : null;
           console.log(`stale: ${path} — run \`em ci init ${model}\` and commit the result${change ? ` (${change})` : ""}`);
           drift = true;
+        } else if (path === ciPath && status.kind === "ok" && refreshCiPullRequestPaths(readFileSync(ciPath, "utf8")) !== null) {
+          // GH #346: the `on:` filter sits outside the managed block; the legacy list is outdated too.
+          console.log(`stale: ${path} - pull_request paths filter is the pre-1.19.0 list; run \`em ci init ${model}\` or \`em upgrade --apply\``);
+          drift = true;
         } else {
           console.log(`ok: ${path}`);
         }
@@ -3734,6 +3740,10 @@ ci.command("init")
     mkdirSync(dirname(ciPath), { recursive: true });
     for (const [path, status] of files) {
       applyCiFile(path, status);
+      if (path === ciPath && (status.kind === "ok" || status.kind === "stale") && applyCiPullRequestPathsRefresh(path)) {
+        console.log(status.kind === "stale" ? `updated ${path}` : `${path}: pull_request paths filter updated to the 1.19.0 list`);
+        continue;
+      }
       if (status.kind === "replace-models") console.log(`replaced ${path} (--force; was generated for ${status.previous.join(", ")})`);
       else if (status.kind === "create") console.log(`installed ${path}`);
       else if (status.kind === "stale") console.log(`updated ${path}`);

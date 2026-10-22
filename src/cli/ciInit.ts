@@ -325,6 +325,54 @@ ${glossaryJob(em)}
           git push`;
 }
 
+/** GH #346: the `pull_request` path filter. Beyond the model sources it covers every file an
+ *  `em upgrade` PR (or a manifest / roster / contract change) touches, so those PRs run the gates
+ *  too. Globs are repo-root relative; a path a repo does not have is simply never matched. */
+export const CI_PR_PATHS: readonly string[] = [
+  "**/*.em",
+  "**/slices/**",
+  "**/README.md",
+  ".github/workflows/em-*.yml",
+  "**/.event-modeling.md",
+  ".claude/settings.json",
+  "**/ratifiers.yaml",
+  "**/system.yaml",
+  "**/contracts/**",
+];
+
+const LEGACY_CI_PR_PATHS = CI_PR_PATHS.slice(0, 3);
+
+/** GH #346: rewrite the legacy filter of the workflow at `path` in place; true when it changed.
+ *  Shared by `em ci init` and the `ci-block` upgrade step. The caller decides eligibility (managed
+ *  block status ok/stale only - markers removed is the opt-out). */
+export function applyCiPullRequestPathsRefresh(path: string): boolean {
+  const refreshed = refreshCiPullRequestPaths(readFileSync(path, "utf8"));
+  if (refreshed === null) return false;
+  writeFileSync(path, refreshed, "utf8");
+  return true;
+}
+
+/** GH #346: the entries of CI_PR_PATHS a workflow's `pull_request.paths` lacks, or null when the
+ *  workflow has no such list. Used to explain a hand-edited filter that `refreshCiPullRequestPaths`
+ *  leaves alone. */
+export function missingCiPullRequestPaths(content: string): string[] | null {
+  const m = /^ {2}pull_request:\n {4}paths:\n((?: {6}- .*\n)+)/m.exec(content);
+  if (!m) return null;
+  const have = new Set([...m[1].matchAll(/^ +- (.*)$/gm)].map((x) => x[1].replace(/\s+#.*$/, "").trim().replace(/^"(.*)"$/, "$1")));
+  return CI_PR_PATHS.filter((p) => !have.has(p));
+}
+const pathLines = (paths: readonly string[]): string => paths.map((p) => `      - "${p}"`).join("\n");
+
+/** GH #346: the `on:` block sits in the header, outside the GENERATED markers, so the managed-block
+ *  refresh never reaches it. When a workflow still carries EXACTLY the pre-1.19 three-entry
+ *  `pull_request.paths` list, return the content with the current list; otherwise null (already
+ *  current, or the repo edited its own filter - which stays untouched). */
+export function refreshCiPullRequestPaths(content: string): string | null {
+  const legacy = `  pull_request:\n    paths:\n${pathLines(LEGACY_CI_PR_PATHS)}\n  push:`;
+  if (!content.includes(legacy)) return null;
+  return content.replace(legacy, () => `  pull_request:\n    paths:\n${pathLines(CI_PR_PATHS)}\n  push:`);
+}
+
 function ciWorkflowHeader(model: string, emVersion: string): string {
   return `# Generated once by \`em ci init ${model}\` (em ${emVersion}) - docs/ci.md
 #
@@ -340,9 +388,7 @@ name: em ci
 on:
   pull_request:
     paths:
-      - "**/*.em"
-      - "**/slices/**"
-      - "**/README.md"
+${pathLines(CI_PR_PATHS)}
   push:
     branches: [main]
 
