@@ -12,6 +12,7 @@ import {
   PUBLIC_SCALAR_TYPE_NAMES,
   TypeDecl,
   normalizeName,
+  recordingCommandsOf,
   resolvePublicType,
   resolveTypeRef,
 } from "./model.js";
@@ -77,6 +78,8 @@ export function validate(model: NormalizedModel, grid: Grid, refs: RefsResult): 
       refs: [refOf(c.dropped.id), refOf(c.kept.id)],
     });
   }
+
+  const eventFieldReported = new Set<string>();
 
   for (const slice of model.slices) {
     const command = slice.elements.find((e) => e.kind === "command");
@@ -287,37 +290,40 @@ export function validate(model: NormalizedModel, grid: Grid, refs: RefsResult): 
       }
     }
 
-    // Fields completeness: every event field in a slice should trace to a field on
-    // one of that slice's commands (unioned) — again, only once both sides declare
-    // `{ fields }`: the event, and *every* command in the slice. A fieldless
-    // command may be the field's provider, so a mixed slice stays silent. A field
-    // marked `assigned` (MIL-148) opts out of this check entirely — it's the
-    // model's own record that the server/handler sets the field, not the command.
+    // Fields completeness (GH #344): every event field should trace to a field on one of the
+    // commands that RECORD the event — the union across every slice the event appears in
+    // (a bare repeat inherits the first definition's fields, and its own slice's command may
+    // provide only a subset; the other recording command provides the rest). Still silent
+    // until the event declares `{ fields }` and *every* recording command does too — a
+    // fieldless command may be the field's provider. A field marked `assigned` (MIL-148)
+    // opts out entirely. A field no recording command provides stays a warning, reported once
+    // per event (at its first instance in a slice with a command), not once per repeat.
     if (commands.length > 0) {
-      const commandsDeclareFields = commands.every((c) => (c.fields ?? []).length > 0);
-      if (commandsDeclareFields) {
+      for (const evt of events) {
+        if (!evt.fields || evt.fields.length === 0) continue;
+        const recording = recordingCommandsOf(model, evt.logicalId);
+        if (!recording.every((c) => (c.fields ?? []).length > 0)) continue;
         const commandFieldUnion = new Set<string>();
-        for (const c of commands) {
+        for (const c of recording) {
           for (const f of c.fields ?? []) commandFieldUnion.add(normalizeName(f.name));
         }
-        const cmdList = commands.map((c) => `"${c.name}"`).join(", ");
-        const byCommands = commands.length === 1 ? `command ${cmdList}` : `any of commands ${cmdList}`;
-        for (const evt of events) {
-          if (!evt.fields || evt.fields.length === 0) continue;
-          for (const f of evt.fields) {
-            // `assigned` fields (MIL-148) are system-assigned — set by the server/handler,
-            // never supplied by the triggering command — so they never trace to a command
-            // field and never warn here. They stay fully visible to the view↔event check
-            // above, which is a separate loop this one doesn't touch.
-            if (f.assigned) continue;
-            if (!commandFieldUnion.has(normalizeName(f.name))) {
-              pushDiag(diags, "fields-completeness/event-field-no-source", {
-                message: `event "${evt.name}" field "${f.name}" not provided by ${byCommands}`,
-                line: evt.line,
-                refs: [refOf(evt.id), ...commands.map((c) => refOf(c.id))],
-              });
-            }
-          }
+        const cmdList = recording.map((c) => `"${c.name}"`).join(", ");
+        const byCommands = recording.length === 1 ? `command ${cmdList}` : `any of commands ${cmdList}`;
+        for (const f of evt.fields) {
+          // `assigned` fields (MIL-148) are system-assigned — set by the server/handler,
+          // never supplied by the triggering command — so they never trace to a command
+          // field and never warn here. They stay fully visible to the view<->event check
+          // above, which is a separate loop this one doesn't touch.
+          if (f.assigned) continue;
+          if (commandFieldUnion.has(normalizeName(f.name))) continue;
+          const key = `${evt.logicalId}\u0000${normalizeName(f.name)}`;
+          if (eventFieldReported.has(key)) continue;
+          eventFieldReported.add(key);
+          pushDiag(diags, "fields-completeness/event-field-no-source", {
+            message: `event "${evt.name}" field "${f.name}" not provided by ${byCommands}`,
+            line: evt.line,
+            refs: [refOf(evt.id), ...recording.map((c) => refOf(c.id))],
+          });
         }
       }
     }
