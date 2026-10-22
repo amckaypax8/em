@@ -13,6 +13,7 @@ import { decodeQuoted, encodeQuoted } from "../src/parser/lexer.js";
 import { rewriteParkingLotFragments } from "../src/cli/defer.js";
 import { buildStorylineSuggestion } from "../src/cli/storylineSuggest.js";
 import { MODEL_117, sliceDocText, writeModel117 } from "./helpers/model117.js";
+import { sliceDocV117BodyHash } from "../src/catalog/sliceDoc.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -70,15 +71,48 @@ describe("view-doc-sources-stale (GH #280)", () => {
     expect(step(dir, "view-doc-sources-stale").applicable).toBe(false);
   });
 
-  it("a signed (shipped) doc is reported and left alone, and is a human item", () => {
+  it("GH #347: a signed (shipped) doc is synced too (the signature covers the authored text only), and is no human item", () => {
     const dir = repo({ signedOrders: true });
     const d = step(dir, "view-doc-sources-stale");
-    expect(d.applicable).toBe(false);
-    expect(d.reason).toContain("left alone");
+    expect(d.applicable).toBe(true);
     expect(d.reason).toContain("slices/orders.md");
+    expect(d.reason).toContain("a ratified or shipped doc keeps its signature");
+    expect(detectUpgrade(ctxOf(dir)).human.find((h) => h.id === "slice-doc-stale-signed")).toBeUndefined();
+    const result = applyUpgrade(ctxOf(dir));
+    expect(result.ok).toBe(true);
+    const text = readFileSync(join(dir, "slices", "orders.md"), "utf8");
+    expect(text).toContain("status: implemented");
+    expect(text).toContain('built from events: "Order Placed", "Order Placed Manually" (via "Orders manual")');
+  });
+
+  it("GH #347: a signed doc whose rewrite sync must refuse fails view-doc-sources-stale and stays a slice-doc-stale-signed item", () => {
+    const dir = repo();
+    const doc = join(dir, "slices", "orders.md");
+    const plain = readFileSync(doc, "utf8");
+    // Two ratifiedHash lines: the parser reads the last, the frontmatter surgery rewrites the first —
+    // so re-stamping the (intact, 1.17-scope) hash cannot verify and keepSignature refuses.
+    writeFileSync(
+      doc,
+      plain.replace("status: draft", `status: ready-to-implement\nratifiedBy: Alex\nratifiedHash: sha256:junk\nratifiedHash: ${sliceDocV117BodyHash(plain)}`),
+    );
+    const item = detectUpgrade(ctxOf(dir)).human.find((h) => h.id === "slice-doc-stale-signed");
+    expect(item?.reason).toContain("slices/orders.md (em-slice-view)");
+    const before = readFileSync(doc, "utf8");
+    const outcome = UPGRADE_STEPS.find((s) => s.id === "view-doc-sources-stale")!.apply(ctxOf(dir));
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.message).toContain("slices/orders.md: em slice sync could not rewrite it");
+    expect(readFileSync(doc, "utf8")).toBe(before);
+  });
+
+  it("GH #347: slice-doc-stale-signed (a signed doc stale in a region no step syncs) now says run `em slice sync`, not revise", () => {
+    const dir = repo();
+    const doc = join(dir, "slices", "place-order.md");
+    writeFileSync(doc, readFileSync(doc, "utf8").replace("status: draft", "status: implemented"));
+    writeFileSync(join(dir, "orders.em"), MODEL_117.replace("event Order Placed @Sales { orderId: string, total: number }", "event Order Placed @Sales { orderId: string, total: number, currency: string }"));
     const item = detectUpgrade(ctxOf(dir)).human.find((h) => h.id === "slice-doc-stale-signed")!;
-    expect(item.reason).toContain("em slice revise orders");
-    expect(item.reason).toContain("em slice sync");
+    expect(item.reason).toContain("slices/place-order.md (em-slice-event)");
+    expect(item.reason).toContain("run `em slice sync orders.em` (it rewrites the generated regions and keeps the signature: ratifiedHash covers the authored text only)");
+    expect(item.reason).not.toContain("em slice revise");
   });
 
   it("shared-event-now-legal is an information-only human item for an event recorded by two commands", () => {
