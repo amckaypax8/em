@@ -543,6 +543,17 @@ em upgrade <model>.em --apply    # one git commit per step, then the final `Em v
 
 The 1.19.0 steps, in order: `ci-block` (now also rewrites the header's `pull_request.paths` when it is the exact old list) and `ratified-hash-scope` (now also re-stamps 1.17–1.18 hashes), plus `view-doc-sources-stale` and `collapse-alternative-events` syncing signed docs. Human items: `ci-paths-hand-edited`, `slice-doc-stale-signed` (now "run `em slice sync`"). Then run `em slice sync <model>.em` once to refresh generated `em-slice-event` regions, and consider `em slice sync --check` in CI (see [ci.md](ci.md)).
 
+## 1.19.3
+
+| What changed for a model repo | Handled by `em upgrade`? |
+|---|---|
+| **`both-ends-of-a-flow/view-unconsumed` no longer warns on an instance of a read model that a reaction reads anywhere in the model** (GH #365, [validation.md](validation.md#both-ends-of-a-flow)): a reaction (`processor` / `automation` / `saga` / `translation`) that reads a view by name now consumes every instance of that logical view, before or after its slice, so the continuations of an automation's to-do list (`view X again from "E"` drawn after the processor, as time-ordering requires) stop warning. A `ui` reader still consumes only the instance it shows; a continuation in a slice with no screen and no reaction anywhere still needs `shown on "Screen"`. Rendering unchanged | no action needed. Models with that shape lose the warnings; a `shown on` or duplicate-processor workaround added for them can be removed |
+| **Release note: update the `@milehimikey/em` dependency and move the plugin pin to `em-1-19-3` / `v1.19.3` (and mise) together.** No `em upgrade` step, no schema bumps. | no action needed |
+
+### Upgrading to 1.19.3
+
+Update the `@milehimikey/em` dependency (and the plugin pin to `em-1-19-3` / `v1.19.3` on plugin repos, and the mise pin), all together. `em upgrade <model>.em` has no 1.19.3 step and only bumps the `Em version:` line. Re-run `em validate` to see the continuation warnings gone.
+
 ## 1.19.2
 
 | What changed for a model repo | Handled by `em upgrade`? |
