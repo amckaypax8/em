@@ -543,6 +543,26 @@ em upgrade <model>.em --apply    # one git commit per step, then the final `Em v
 
 The 1.19.0 steps, in order: `ci-block` (now also rewrites the header's `pull_request.paths` when it is the exact old list) and `ratified-hash-scope` (now also re-stamps 1.17–1.18 hashes), plus `view-doc-sources-stale` and `collapse-alternative-events` syncing signed docs. Human items: `ci-paths-hand-edited`, `slice-doc-stale-signed` (now "run `em slice sync`"). Then run `em slice sync <model>.em` once to refresh generated `em-slice-event` regions, and consider `em slice sync --check` in CI (see [ci.md](ci.md)).
 
+## 1.19.4
+
+| What changed for a model repo | Handled by `em upgrade`? |
+|---|---|
+| **`em slice sync` retires a collection field's scenario stub once `## Scenarios` covers it** (GH #368, [slice-doc-schema.md](slice-doc-schema.md#generated-regions-and-authored-sections), [cli.md](cli.md#em-slice-sync-file-key)): a stub `em slice sync` writes under a `T[] derived from "E1", "E2"` field's table (GH #288) is dropped when an authored scenario covers that field and event — by the stub's own `<field> after <Event>` title (case, spacing and punctuation ignored) or by a Given naming the event with the field named anywhere in the block; the `Scenario stubs for` line goes when none is left. A fresh doc, and a doc that has written none of its stubs, render exactly as in 1.19.3. `em slice new --wire` unchanged | `human:` run `em slice sync <model>.em` (`--check` lists the docs whose regions are stale because they already hold the scenarios); the signature is kept (GH #347) and `slice-doc/generated-region-placeholder` clears for those docs. No action where no scenario has been written yet |
+| **New warning `slice-doc/scenario-title-duplicate`** (GH #368, [validation.md](validation.md#duplicate-scenario-titles)): two or more `### Scenario:` blocks under one title in a bound doc's `## Scenarios` section. Counted on the authored text only (a stub in a generated region never counts). Not on the gating list | no action needed; merge the blocks or rename one where it fires |
+| **Dependency patch** (GH #369): `ip-address` 10.7.3 to 10.7.4 (transitive, runtime, via `@modelcontextprotocol/sdk`), `package-lock.json` only; `npm audit` clean. MCP behaviour unchanged | no action needed |
+| **Release note: update the `@milehimikey/em` dependency and move the plugin pin to `em-1-19-4` / `v1.19.4` (and mise) together.** No `em upgrade` step, no schema bumps. | no action needed |
+
+### Upgrading to 1.19.4
+
+Update the `@milehimikey/em` dependency (and the plugin pin to `em-1-19-4` / `v1.19.4` on plugin repos, and the mise pin), all together, then in each consumer repo:
+
+```bash
+em slice sync <model>.em --check   # docs whose collection stubs are now covered by their own scenarios
+em slice sync <model>.em           # rewrites them; signatures are kept (GH #347)
+```
+
+`em upgrade <model>.em` has no 1.19.4 step and only bumps the `Em version:` line. Models without a collection field (`T[] derived from …`) see no change.
+
 ## 1.19.3
 
 | What changed for a model repo | Handled by `em upgrade`? |
