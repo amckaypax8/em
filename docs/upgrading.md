@@ -543,6 +543,19 @@ em upgrade <model>.em --apply    # one git commit per step, then the final `Em v
 
 The 1.19.0 steps, in order: `ci-block` (now also rewrites the header's `pull_request.paths` when it is the exact old list) and `ratified-hash-scope` (now also re-stamps 1.17–1.18 hashes), plus `view-doc-sources-stale` and `collapse-alternative-events` syncing signed docs. Human items: `ci-paths-hand-edited`, `slice-doc-stale-signed` (now "run `em slice sync`"). Then run `em slice sync <model>.em` once to refresh generated `em-slice-event` regions, and consider `em slice sync --check` in CI (see [ci.md](ci.md)).
 
+## 1.19.5
+
+| What changed for a model repo | Handled by `em upgrade`? |
+|---|---|
+| **`em upgrade`'s rewriting steps keep the comment above a moved line** (GH #374, [cli.md](cli.md#em-upgrade-file)): `fold-continuations` (both the stack form and `--to-sugar`) used to copy only each `view … again` line, dropping a `#` comment written directly above it with no word in the dry run; `collapse-alternative-events` lost a comment above a later slice's `ui` and silently refused to merge when one sat above its event. A contiguous run of `#` lines directly above an element now belongs to that element and travels with it — into the kept slice, the host, or above the merged `event A | B` line / its `oneof { … }` entry. A comment the rewrite cannot place (above a folded slice's `ui`, say) is named in the step's reason, dry run and apply alike, as dropped — move it by hand first. `.em` syntax, exports and validation unchanged | no action needed. A model already folded under 1.18.0–1.19.4 has lost those comments: recover them from git history |
+| **`em validate --slice-ready` says why `ready` is false** (GH #377, [cli.md](cli.md#em-validate-file)): `ready` can be `false` with every named gate `true` — a gating warning such as `both-ends-of-a-flow/event-unread` on one of the slice's own elements, by design since GH #332 — and nothing named it. `--json` gains top-level `blockedBy` (the distinct codes that flipped `ready`, `[]` when ready; `validateSliceReadySchemaVersion` 1.4 → 1.5, additive), the text verdict reads `is NOT ready-to-implement — blocked by: <codes>`, the MCP `slice_ready` tool returns the same document. `ready` and the exit code unchanged. `reference/implement.md` §1, `docs/validation.md` and `docs/ci.md` now list which warnings never gate | no action needed. A script that matches the whole text verdict line needs the new suffix; a `.ready` CI job may print `.blockedBy` beside it |
+| **`em engagement plan` no longer sees a to-do view's continuation as a cycle** (GH #378, [cli.md](cli.md#em-engagement-plan-file-slug---json)): a `view … again` instance reading an event recorded downstream of the view's own automation (the normal way a row drops) used to make plan refuse with `the engagement's dependency graph has a cycle`. Edges into `again` instances now leave the levelling graph like `loops-to` edges: a continuation has no doc or PR of its own and its inputs never order a build. Selection (`--downstream-of`, the components warning) still follows them. The cycle message now reads `(loops-to and again-continuation edges already excluded)`; plan JSON shape unchanged | no action needed |
+| **Release note: update the `@milehimikey/em` dependency and move the plugin pin to `em-1-19-5` / `v1.19.5` (and mise) together.** No `em upgrade` step; the only schema change is the additive `--slice-ready --json` 1.5. | no action needed |
+
+### Upgrading to 1.19.5
+
+Update the `@milehimikey/em` dependency (and the plugin pin to `em-1-19-5` / `v1.19.5` on plugin repos, and the mise pin), all together. `em upgrade <model>.em` has no 1.19.5 step and only bumps the `Em version:` line; nothing to run in consumer repos.
+
 ## 1.19.4
 
 | What changed for a model repo | Handled by `em upgrade`? |
